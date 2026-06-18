@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+acc_script="${BASH_SOURCE[0]}"
+acc_bin_dir="$(cd "${acc_script%/*}" && pwd -P)"
+
+exec "$acc_bin_dir/pack-opener-ui" "$@"

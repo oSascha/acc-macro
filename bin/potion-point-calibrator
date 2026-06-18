@@ -1,0 +1,602 @@
+#!/usr/bin/env bash
+#
+# potion-point-calibrator: terminal calibration UI for Pack Opener potion points.
+#
+# Scope guards:
+#   * edits only potion-related point coordinates in runtime/template points.conf
+#   * never edits placement logic, walk durations, potion timing, or potion amount
+#   * never touches PACK_CLICK_POINT or old macro folders
+#   * live mouse movement/clicking requires typed CALIBRATE confirmation
+
+set -uo pipefail
+
+calibrator_script="${BASH_SOURCE[0]}"
+calibrator_bin_dir="$(cd "${calibrator_script%/*}" && pwd -P)"
+PROJECT_ROOT="${calibrator_bin_dir%/bin}"
+
+RUNTIME_DIR="$PROJECT_ROOT/runtime_config/pack_opener"
+RUNTIME_POINTS="$RUNTIME_DIR/points.conf"
+TEMPLATE_POINTS="$PROJECT_ROOT/config_templates/pack_opener/points.conf"
+LOG_DIR="$PROJECT_ROOT/05_debug_snapshots/logs"
+PATCH_DIR="$PROJECT_ROOT/05_debug_snapshots/patches"
+
+# shellcheck source=../src/lib/input.sh
+. "$PROJECT_ROOT/src/lib/input.sh"
+
+declare -a POINT_NAMES=(
+  MENU_BUTTON
+  CLOSE_BUTTON
+  POTION_2_MIN
+  POTION_2_MIN_USE_SINGLE_BUTTON
+  POTION_2_MIN_USE_10X_BUTTON
+  POTION_6_MIN
+  POTION_6_MIN_USE_SINGLE_BUTTON
+  POTION_6_MIN_USE_10X_BUTTON
+  POTION_15_MIN
+  POTION_15_MIN_USE_SINGLE_BUTTON
+  POTION_15_MIN_USE_10X_BUTTON
+  USE_SINGLE_BUTTON
+  USE_10X_BUTTON
+)
+
+declare -A POINT_GROUP=(
+  [MENU_BUTTON]="Group 1 - Core menu"
+  [CLOSE_BUTTON]="Group 1 - Core menu"
+  [POTION_2_MIN]="Group 2 - Hatch 1 / 2-minute potion"
+  [POTION_2_MIN_USE_SINGLE_BUTTON]="Group 2 - Hatch 1 / 2-minute potion"
+  [POTION_2_MIN_USE_10X_BUTTON]="Group 2 - Hatch 1 / 2-minute potion"
+  [POTION_6_MIN]="Group 3 - 6-minute potion"
+  [POTION_6_MIN_USE_SINGLE_BUTTON]="Group 3 - 6-minute potion"
+  [POTION_6_MIN_USE_10X_BUTTON]="Group 3 - 6-minute potion"
+  [POTION_15_MIN]="Group 4 - 15-minute potion"
+  [POTION_15_MIN_USE_SINGLE_BUTTON]="Group 4 - 15-minute potion"
+  [POTION_15_MIN_USE_10X_BUTTON]="Group 4 - 15-minute potion"
+  [USE_SINGLE_BUTTON]="Group 5 - Generic fallback buttons"
+  [USE_10X_BUTTON]="Group 5 - Generic fallback buttons"
+)
+
+declare -A POINT_INSTRUCTION=(
+  [MENU_BUTTON]="Inventory/menu button that opens the potion inventory."
+  [CLOSE_BUTTON]="Close inventory/menu button."
+  [POTION_2_MIN]="Hatch 1 / 2-minute potion tier button."
+  [POTION_2_MIN_USE_SINGLE_BUTTON]="Single-use button for Hatch 1 / 2-minute potion."
+  [POTION_2_MIN_USE_10X_BUTTON]="10x-use button for Hatch 1 / 2-minute potion."
+  [POTION_6_MIN]="6-minute potion tier button."
+  [POTION_6_MIN_USE_SINGLE_BUTTON]="Single-use button for 6-minute potion."
+  [POTION_6_MIN_USE_10X_BUTTON]="10x-use button for 6-minute potion."
+  [POTION_15_MIN]="15-minute potion tier button."
+  [POTION_15_MIN_USE_SINGLE_BUTTON]="Single-use button for 15-minute potion."
+  [POTION_15_MIN_USE_10X_BUTTON]="10x-use button for 15-minute potion."
+  [USE_SINGLE_BUTTON]="Generic fallback single-use button."
+  [USE_10X_BUTTON]="Generic fallback 10x-use button."
+)
+
+declare -A POINT_FALLBACK=(
+  [POTION_2_MIN_USE_SINGLE_BUTTON]="USE_SINGLE_BUTTON"
+  [POTION_2_MIN_USE_10X_BUTTON]="USE_10X_BUTTON"
+)
+
+declare -A ORIGINAL_X=()
+declare -A ORIGINAL_Y=()
+declare -A CURRENT_X=()
+declare -A CURRENT_Y=()
+declare -A ORIGINALLY_UNSET=()
+declare -A INIT_SOURCE=()
+declare -A VISITED=()
+declare -A SAVED=()
+declare -A COPIED=()
+
+backup_created=0
+backup_file=""
+summary_log=""
+summary_written=0
+calibration_started=0
+completed_sequence=0
+copied_any=0
+
+usage() {
+  printf 'Usage: %s [--help]\n' "$0"
+  printf '       %s --list-points\n' "$0"
+  printf '       %s --print-current\n' "$0"
+  printf '\n'
+  printf 'Without flags, starts the interactive potion point calibrator.\n'
+  printf 'Interactive mode moves the mouse and can click after typed CALIBRATE confirmation.\n'
+  printf 'After confirmation it sets MACRO_INPUT_MODE=live and MACRO_LIVE_INPUT_ALLOWED=1 for the existing input helpers.\n'
+}
+
+config_get() {
+  local file="$1"
+  local key="$2"
+  local line
+
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n1)" || true
+  if test -z "$line"; then
+    return 1
+  fi
+  printf '%s' "${line#*=}"
+}
+
+config_set() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+
+  if grep -qE "^${key}=" "$file"; then
+    sed -i -E "s|^${key}=.*|${key}=${value}|" "$file"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+is_integer() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+point_saved_pair_is_valid() {
+  local point="$1"
+  local x
+  local y
+
+  x="$(config_get "$RUNTIME_POINTS" "${point}_X" || true)"
+  y="$(config_get "$RUNTIME_POINTS" "${point}_Y" || true)"
+  is_integer "$x" && is_integer "$y"
+}
+
+point_value_display() {
+  local x="$1"
+  local y="$2"
+
+  if is_integer "$x" && is_integer "$y"; then
+    printf '%s,%s' "$x" "$y"
+  else
+    printf '<unset>'
+  fi
+}
+
+ensure_runtime_points() {
+  mkdir -p "$RUNTIME_DIR"
+  if ! test -f "$RUNTIME_POINTS"; then
+    cp "$TEMPLATE_POINTS" "$RUNTIME_POINTS"
+    printf 'Created runtime points config from template: %s\n' "$RUNTIME_POINTS"
+  fi
+}
+
+load_points() {
+  local point
+  local x
+  local y
+  local fallback
+
+  for point in "${POINT_NAMES[@]}"; do
+    x="$(config_get "$RUNTIME_POINTS" "${point}_X" || true)"
+    y="$(config_get "$RUNTIME_POINTS" "${point}_Y" || true)"
+    ORIGINAL_X["$point"]="$x"
+    ORIGINAL_Y["$point"]="$y"
+    COPIED["$point"]="no"
+    SAVED["$point"]="no"
+    VISITED["$point"]="no"
+
+    if is_integer "$x" && is_integer "$y"; then
+      CURRENT_X["$point"]="$x"
+      CURRENT_Y["$point"]="$y"
+      ORIGINALLY_UNSET["$point"]="no"
+      INIT_SOURCE["$point"]="saved"
+      continue
+    fi
+
+    ORIGINALLY_UNSET["$point"]="yes"
+    fallback="${POINT_FALLBACK[$point]-}"
+    if test -n "$fallback" && point_saved_pair_is_valid "$fallback"; then
+      CURRENT_X["$point"]="$(config_get "$RUNTIME_POINTS" "${fallback}_X")"
+      CURRENT_Y["$point"]="$(config_get "$RUNTIME_POINTS" "${fallback}_Y")"
+      INIT_SOURCE["$point"]="fallback ${fallback}"
+    else
+      CURRENT_X["$point"]="0"
+      CURRENT_Y["$point"]="0"
+      INIT_SOURCE["$point"]="safe default 0,0"
+    fi
+  done
+}
+
+print_list_points() {
+  local i
+  local point
+
+  for i in "${!POINT_NAMES[@]}"; do
+    point="${POINT_NAMES[$i]}"
+    printf '%2d. %-34s  %s\n' "$((i + 1))" "$point" "${POINT_GROUP[$point]}"
+  done
+}
+
+print_current() {
+  local point
+  local x
+  local y
+  local status
+
+  printf 'Potion point runtime config: %s\n\n' "$RUNTIME_POINTS"
+  if ! test -f "$RUNTIME_POINTS"; then
+    printf 'Runtime points config not found.\n'
+    return 1
+  fi
+
+  for point in "${POINT_NAMES[@]}"; do
+    x="$(config_get "$RUNTIME_POINTS" "${point}_X" || true)"
+    y="$(config_get "$RUNTIME_POINTS" "${point}_Y" || true)"
+    if is_integer "$x" && is_integer "$y"; then
+      status="set"
+    else
+      status="unset"
+    fi
+    printf '%-34s x=%-5s y=%-5s status=%s\n' "$point" "${x:-<blank>}" "${y:-<blank>}" "$status"
+  done
+}
+
+create_backup_once() {
+  local ts
+
+  if test "$backup_created" = "1"; then
+    return 0
+  fi
+
+  ts="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$PATCH_DIR"
+  backup_file="$PATCH_DIR/points.potion_calibrator_backup.${ts}.conf"
+  cp "$RUNTIME_POINTS" "$backup_file"
+  backup_created=1
+  printf 'Backup created: %s\n' "$backup_file"
+}
+
+save_point() {
+  local point="$1"
+  local x="${CURRENT_X[$point]}"
+  local y="${CURRENT_Y[$point]}"
+
+  create_backup_once || return 2
+  config_set "$RUNTIME_POINTS" "${point}_X" "$x"
+  config_set "$RUNTIME_POINTS" "${point}_Y" "$y"
+  SAVED["$point"]="yes"
+  printf 'Saved %s=%s,%s\n' "$point" "$x" "$y"
+}
+
+move_current_point() {
+  local point="$1"
+  local x="${CURRENT_X[$point]}"
+  local y="${CURRENT_Y[$point]}"
+
+  move_mouse "$x" "$y"
+}
+
+test_click_current_point() {
+  local point="$1"
+  local x="${CURRENT_X[$point]}"
+  local y="${CURRENT_Y[$point]}"
+
+  move_mouse "$x" "$y" || return 2
+  input_click_current
+}
+
+countdown_and_move() {
+  local point="$1"
+  local n
+
+  printf '\nPrepare the game UI for this point. Moving to saved point in 3 seconds.\n'
+  for n in 3 2 1; do
+    printf '%s\n' "$n"
+    sleep 1
+  done
+  move_current_point "$point"
+}
+
+draw_screen() {
+  local point="$1"
+  local original
+  local current
+
+  original="$(point_value_display "${ORIGINAL_X[$point]}" "${ORIGINAL_Y[$point]}")"
+  current="$(point_value_display "${CURRENT_X[$point]}" "${CURRENT_Y[$point]}")"
+
+  printf '\033c'
+  printf 'POTION POINT CALIBRATOR\n\n'
+  printf 'Group:            %s\n' "${POINT_GROUP[$point]}"
+  printf 'Point:            %s\n' "$point"
+  printf 'Current x,y:      %s\n' "$current"
+  printf 'Original x,y:     %s\n' "$original"
+  printf 'Originally unset: %s\n' "${ORIGINALLY_UNSET[$point]}"
+  printf 'Initial source:   %s\n' "${INIT_SOURCE[$point]}"
+  printf 'Instruction:      %s\n\n' "${POINT_INSTRUCTION[$point]}"
+  printf 'Controls:\n'
+  printf '  w/a/s/d = nudge 1px    W/A/S/D = nudge 10px\n'
+  printf '  c = test-click         v = save + next       p = save + previous\n'
+  printf '  n = skip + next        e = enter x,y         r = reload original\n'
+  printf '  q = quit\n\n'
+  printf 'Command: '
+}
+
+read_manual_coordinates() {
+  local point="$1"
+  local input
+  local x
+  local y
+
+  printf '\nEnter coordinates as x,y: '
+  IFS= read -r input
+  input="${input//[[:space:]]/}"
+  if [[ ! "$input" =~ ^[0-9]+,[0-9]+$ ]]; then
+    printf 'Invalid coordinates. Use x,y with non-negative integers.\n'
+    sleep 1
+    return 1
+  fi
+
+  x="${input%,*}"
+  y="${input#*,}"
+  CURRENT_X["$point"]="$x"
+  CURRENT_Y["$point"]="$y"
+  move_current_point "$point"
+}
+
+reload_original() {
+  local point="$1"
+  local x="${ORIGINAL_X[$point]}"
+  local y="${ORIGINAL_Y[$point]}"
+  local fallback
+
+  if is_integer "$x" && is_integer "$y"; then
+    CURRENT_X["$point"]="$x"
+    CURRENT_Y["$point"]="$y"
+    move_current_point "$point"
+    return $?
+  fi
+
+  fallback="${POINT_FALLBACK[$point]-}"
+  if test -n "$fallback" && point_saved_pair_is_valid "$fallback"; then
+    CURRENT_X["$point"]="$(config_get "$RUNTIME_POINTS" "${fallback}_X")"
+    CURRENT_Y["$point"]="$(config_get "$RUNTIME_POINTS" "${fallback}_Y")"
+  else
+    CURRENT_X["$point"]="0"
+    CURRENT_Y["$point"]="0"
+  fi
+  move_current_point "$point"
+}
+
+nudge_point() {
+  local point="$1"
+  local dx="$2"
+  local dy="$3"
+  local x
+  local y
+
+  x=$((${CURRENT_X[$point]} + dx))
+  y=$((${CURRENT_Y[$point]} + dy))
+  if test "$x" -lt 0; then
+    x=0
+  fi
+  if test "$y" -lt 0; then
+    y=0
+  fi
+  CURRENT_X["$point"]="$x"
+  CURRENT_Y["$point"]="$y"
+  move_current_point "$point"
+}
+
+copy_saved_points_to_template() {
+  local point
+  local copied=0
+
+  for point in "${POINT_NAMES[@]}"; do
+    if test "${SAVED[$point]}" != "yes"; then
+      continue
+    fi
+    config_set "$TEMPLATE_POINTS" "${point}_X" "${CURRENT_X[$point]}"
+    config_set "$TEMPLATE_POINTS" "${point}_Y" "${CURRENT_Y[$point]}"
+    COPIED["$point"]="yes"
+    copied=1
+  done
+
+  copied_any="$copied"
+}
+
+point_changed() {
+  local point="$1"
+
+  if test "${ORIGINAL_X[$point]}" != "${CURRENT_X[$point]}" ||
+    test "${ORIGINAL_Y[$point]}" != "${CURRENT_Y[$point]}"; then
+    printf 'yes'
+  else
+    printf 'no'
+  fi
+}
+
+write_summary() {
+  local ts
+  local point
+  local original
+  local final
+
+  if test "$summary_written" = "1" || test "$calibration_started" != "1"; then
+    return 0
+  fi
+
+  ts="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$LOG_DIR"
+  summary_log="$LOG_DIR/potion_point_calibration_${ts}.txt"
+
+  {
+    printf 'Potion point calibration summary\n'
+    printf 'Timestamp: %s\n' "$ts"
+    printf 'Runtime points: %s\n' "$RUNTIME_POINTS"
+    printf 'Template points: %s\n' "$TEMPLATE_POINTS"
+    printf 'Backup: %s\n' "${backup_file:-<none>}"
+    printf 'Completed sequence: %s\n' "$completed_sequence"
+    printf 'Copied to template: %s\n' "$copied_any"
+    printf '\n'
+    printf '%-34s %-15s %-15s %-6s %-7s %-7s %-7s\n' \
+      'point' 'original' 'final' 'saved' 'changed' 'copied' 'unset'
+    for point in "${POINT_NAMES[@]}"; do
+      if test "${VISITED[$point]}" != "yes"; then
+        continue
+      fi
+      original="$(point_value_display "${ORIGINAL_X[$point]}" "${ORIGINAL_Y[$point]}")"
+      final="$(point_value_display "${CURRENT_X[$point]}" "${CURRENT_Y[$point]}")"
+      printf '%-34s %-15s %-15s %-6s %-7s %-7s %-7s\n' \
+        "$point" "$original" "$final" "${SAVED[$point]}" "$(point_changed "$point")" "${COPIED[$point]}" "${ORIGINALLY_UNSET[$point]}"
+    done
+  } > "$summary_log"
+
+  summary_written=1
+  printf '\nCalibration summary written to: %s\n' "$summary_log"
+  if command -v wl-copy >/dev/null 2>&1; then
+    wl-copy < "$summary_log"
+    printf 'Summary log copied to clipboard with wl-copy.\n'
+  fi
+}
+
+on_exit() {
+  write_summary
+}
+
+confirm_start() {
+  local confirm
+
+  printf 'This tool will move the mouse and can click inside Sober/Gamescope. Make sure Sober/Gamescope is running and visible. Type CALIBRATE to start.\n'
+  IFS= read -r confirm
+  if test "$confirm" != "CALIBRATE"; then
+    printf 'Calibration not started.\n'
+    exit 0
+  fi
+}
+
+run_interactive() {
+  local index=0
+  local point
+  local key
+
+  ensure_runtime_points || return 2
+  load_points
+  confirm_start
+
+  if ! command -v xdotool >/dev/null 2>&1; then
+    printf 'ERROR: xdotool is required for live calibration input.\n' >&2
+    return 2
+  fi
+
+  export MACRO_INPUT_MODE=live
+  export MACRO_LIVE_INPUT_ALLOWED=1
+  calibration_started=1
+  trap on_exit EXIT
+
+  while test "$index" -lt "${#POINT_NAMES[@]}"; do
+    point="${POINT_NAMES[$index]}"
+    VISITED["$point"]="yes"
+    countdown_and_move "$point" || return 2
+
+    while true; do
+      draw_screen "$point"
+      IFS= read -rsn1 key
+      printf '\n'
+
+      case "$key" in
+        w)
+          nudge_point "$point" 0 -1 || return 2
+          ;;
+        a)
+          nudge_point "$point" -1 0 || return 2
+          ;;
+        s)
+          nudge_point "$point" 0 1 || return 2
+          ;;
+        d)
+          nudge_point "$point" 1 0 || return 2
+          ;;
+        W)
+          nudge_point "$point" 0 -10 || return 2
+          ;;
+        A)
+          nudge_point "$point" -10 0 || return 2
+          ;;
+        S)
+          nudge_point "$point" 0 10 || return 2
+          ;;
+        D)
+          nudge_point "$point" 10 0 || return 2
+          ;;
+        c)
+          test_click_current_point "$point" || return 2
+          ;;
+        v)
+          save_point "$point" || return 2
+          index=$((index + 1))
+          break
+          ;;
+        p)
+          save_point "$point" || return 2
+          if test "$index" -gt 0; then
+            index=$((index - 1))
+          fi
+          break
+          ;;
+        n)
+          index=$((index + 1))
+          break
+          ;;
+        e)
+          read_manual_coordinates "$point" || true
+          ;;
+        r)
+          reload_original "$point" || return 2
+          ;;
+        q)
+          completed_sequence=0
+          return 0
+          ;;
+        *)
+          printf 'Unknown command: %s\n' "$key"
+          sleep 1
+          ;;
+      esac
+    done
+  done
+
+  completed_sequence=1
+  printf '\nAlso copy these calibrated potion points to config_templates/pack_opener/points.conf? Type YES to copy, anything else to keep runtime only.\n'
+  IFS= read -r key
+  if test "$key" = "YES"; then
+    copy_saved_points_to_template
+    if test "$copied_any" = "1"; then
+      printf 'Copied saved potion points to template points config.\n'
+    else
+      printf 'No saved points to copy to template.\n'
+    fi
+  fi
+}
+
+case "${1:-}" in
+  --help|-h)
+    if test "$#" -ne 1; then
+      usage >&2
+      exit 2
+    fi
+    usage
+    ;;
+  --list-points)
+    if test "$#" -ne 1; then
+      usage >&2
+      exit 2
+    fi
+    print_list_points
+    ;;
+  --print-current)
+    if test "$#" -ne 1; then
+      usage >&2
+      exit 2
+    fi
+    print_current
+    ;;
+  "")
+    run_interactive
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,46 @@
+# Sample pack opener points — ALL VALUES ARE PLACEHOLDERS
+# Copy to runtime_config/pack_opener/points.conf and calibrate.
+# Use: DISPLAY=:1 xdotool getmouselocation --shell
+# Do NOT commit the calibrated version.
+
+BASE_TELEPORT_BUTTON_X=<calibrate>
+BASE_TELEPORT_BUTTON_Y=<calibrate>
+PLACE_HOLD_POINT_X=<calibrate>
+PLACE_HOLD_POINT_Y=<calibrate>
+PACK_CLICK_POINT_X=<calibrate>
+PACK_CLICK_POINT_Y=<calibrate>
+
+MENU_BUTTON_X=<calibrate>
+MENU_BUTTON_Y=<calibrate>
+POTION_2_MIN_X=<calibrate>
+POTION_2_MIN_Y=<calibrate>
+POTION_2_MIN_USE_SINGLE_BUTTON_X=<calibrate>
+POTION_2_MIN_USE_SINGLE_BUTTON_Y=<calibrate>
+POTION_2_MIN_USE_10X_BUTTON_X=<calibrate>
+POTION_2_MIN_USE_10X_BUTTON_Y=<calibrate>
+
+POTION_6_MIN_X=<calibrate>
+POTION_6_MIN_Y=<calibrate>
+POTION_6_MIN_USE_SINGLE_BUTTON_X=<calibrate>
+POTION_6_MIN_USE_SINGLE_BUTTON_Y=<calibrate>
+POTION_6_MIN_USE_10X_BUTTON_X=<calibrate>
+POTION_6_MIN_USE_10X_BUTTON_Y=<calibrate>
+
+POTION_15_MIN_X=<calibrate>
+POTION_15_MIN_Y=<calibrate>
+POTION_15_MIN_USE_SINGLE_BUTTON_X=<calibrate>
+POTION_15_MIN_USE_SINGLE_BUTTON_Y=<calibrate>
+POTION_15_MIN_USE_10X_BUTTON_X=<calibrate>
+POTION_15_MIN_USE_10X_BUTTON_Y=<calibrate>
+
+USE_SINGLE_BUTTON_X=<calibrate>
+USE_SINGLE_BUTTON_Y=<calibrate>
+USE_10X_BUTTON_X=<calibrate>
+USE_10X_BUTTON_Y=<calibrate>
+CLOSE_BUTTON_X=<calibrate>
+CLOSE_BUTTON_Y=<calibrate>
+
+ITEM_POINT_X=
+ITEM_POINT_Y=
+USE_BUTTON_X=
+USE_BUTTON_Y=

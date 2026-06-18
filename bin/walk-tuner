@@ -1,0 +1,494 @@
+#!/usr/bin/env bash
+#
+# walk-tuner: a tiny terminal UI for tuning Sober Pack Opener walking durations.
+#
+# It edits ONLY the runtime pack-opener timing config and drives placement tests
+# through the existing macroctl commands. It never calls xdotool/ydotool, never
+# implements its own live input, and never runs live on startup. The single live
+# test option runs exactly ONE cycle with --no-potions and requires typed
+# confirmation. Potions are intentionally skipped (potion application is broken).
+#
+# Scope guards (by design):
+#   * does not touch old macro folders
+#   * does not change click worker architecture or movement logic
+#   * does not change PACK_CLICK_POINT
+#   * edits only: PLACE_FORWARD_DURATION, PLACE_LEFT_DURATION,
+#                 PLACE_LIVE_E_ENABLED, PLACE_LIVE_E_INTERVAL
+
+set -uo pipefail
+
+# --- Locate the project root from this script's path -------------------------
+walk_tuner_script="${BASH_SOURCE[0]}"
+walk_tuner_bin_dir="$(cd "${walk_tuner_script%/*}" && pwd -P)"
+PROJECT_ROOT="${walk_tuner_bin_dir%/bin}"
+
+RUNTIME_TIMING="$PROJECT_ROOT/runtime_config/pack_opener/timing.conf"
+TEMPLATE_TIMING="$PROJECT_ROOT/config_templates/pack_opener/timing.conf"
+LOG_DIR="$PROJECT_ROOT/05_debug_snapshots/logs"
+PATCH_DIR="$PROJECT_ROOT/05_debug_snapshots/patches"
+CSV_FILE="$PROJECT_ROOT/04_manual_tests/walk_tuning_results.csv"
+MACROCTL="$PROJECT_ROOT/bin/macroctl"
+
+# Reuse the project's own duration parser so displayed ms match the real runner.
+# shellcheck source=../src/lib/timing.sh
+. "$PROJECT_ROOT/src/lib/timing.sh"
+
+# --- Small helpers -----------------------------------------------------------
+
+ensure_runtime() {
+  mkdir -p "$(dirname "$RUNTIME_TIMING")"
+  if ! test -f "$RUNTIME_TIMING"; then
+    cp "$TEMPLATE_TIMING" "$RUNTIME_TIMING"
+    printf 'Created runtime timing config from template: %s\n' "$RUNTIME_TIMING"
+  fi
+  # This tuner is specifically for placement-with-E testing, so guarantee the
+  # E-enabled key exists (default it on if it was missing entirely).
+  if ! grep -qE '^PLACE_LIVE_E_ENABLED=' "$RUNTIME_TIMING"; then
+    printf 'PLACE_LIVE_E_ENABLED=1\n' >> "$RUNTIME_TIMING"
+    printf 'Added missing PLACE_LIVE_E_ENABLED=1 to runtime timing config.\n'
+  fi
+}
+
+# Read a timing key value (last occurrence wins). Empty string if absent.
+tuner_get() {
+  local key="$1" line
+  line="$(grep -E "^${key}=" "$RUNTIME_TIMING" 2>/dev/null | tail -n1)" || true
+  printf '%s' "${line#*=}"
+}
+
+# Replace or append a timing key in the runtime config.
+tuner_set() {
+  local key="$1" value="$2"
+  if grep -qE "^${key}=" "$RUNTIME_TIMING"; then
+    sed -i -E "s|^${key}=.*|${key}=${value}|" "$RUNTIME_TIMING"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$RUNTIME_TIMING"
+  fi
+}
+
+# Convert integer ms into an existing-compatible duration string.
+#   1300 -> 1s300ms   1100 -> 1s100ms   975 -> 975ms   1000 -> 1s
+ms_to_duration() {
+  local ms="$1" s rem
+  s=$((ms / 1000))
+  rem=$((ms % 1000))
+  if test "$s" -eq 0; then
+    printf '%sms' "$rem"
+  elif test "$rem" -eq 0; then
+    printf '%ss' "$s"
+  else
+    printf '%ss%sms' "$s" "$rem"
+  fi
+}
+
+# Parse a stored duration string to ms for display; "?" if unparseable/empty.
+to_ms() {
+  local v="$1"
+  if test -z "$v"; then
+    printf '?'
+    return
+  fi
+  parse_duration_ms "$v" 2>/dev/null || printf '?'
+}
+
+# --- Display -----------------------------------------------------------------
+
+print_current() {
+  local fwd left e_en e_int burst chunk_click chunk_e grace
+  fwd="$(tuner_get PLACE_FORWARD_DURATION)"
+  left="$(tuner_get PLACE_LEFT_DURATION)"
+  e_en="$(tuner_get PLACE_LIVE_E_ENABLED)"
+  e_int="$(tuner_get PLACE_LIVE_E_INTERVAL)"
+  burst="$(tuner_get PLACE_LIVE_CLICK_BURST_DELAY)"
+  chunk_click="$(tuner_get PLACE_LIVE_CLICK_WORKER_CHUNK_MS)"
+  chunk_e="$(tuner_get PLACE_LIVE_E_WORKER_CHUNK_MS)"
+  grace="$(tuner_get PLACE_LIVE_WORKER_STOP_GRACE_MS)"
+
+  printf 'SOBER PACK WALK TUNER\n'
+  printf 'Runtime config: %s\n' "$RUNTIME_TIMING"
+  printf 'Current runtime settings:\n'
+  printf '  Forward walk:      %sms / %s\n' "$(to_ms "$fwd")" "${fwd:-<unset>}"
+  printf '  Left walk:         %sms / %s\n' "$(to_ms "$left")" "${left:-<unset>}"
+  printf '  E enabled:         %s\n' "${e_en:-<unset>}"
+  printf '  E interval:        %sms / %s\n' "$(to_ms "$e_int")" "${e_int:-<unset>}"
+  printf '  Click burst delay: %sms / %s   (display only)\n' "$(to_ms "$burst")" "${burst:-<unset>}"
+  printf '  Click worker chunk:%sms / %s   (display only)\n' "$(to_ms "$chunk_click")" "${chunk_click:-<unset>}"
+  printf '  E worker chunk:    %sms / %s   (display only)\n' "$(to_ms "$chunk_e")" "${chunk_e:-<unset>}"
+  printf '  Worker stop grace: %sms / %s   (display only)\n' "$(to_ms "$grace")" "${grace:-<unset>}"
+  printf '  Potions during tuner test: disabled via --no-potions\n'
+  printf '  Test mode: one live cycle only\n'
+}
+
+# --- Input validation --------------------------------------------------------
+
+# Read a movement duration in ms; on success sets REPLY_MS. Returns 1 on cancel
+# or invalid. Confirms very large values (> 2500ms).
+read_valid_duration_ms() {
+  local label="$1" input confirm
+  REPLY_MS=""
+  read -r -p "$label (integer ms 100-5000, blank to cancel): " input
+  if test -z "$input"; then
+    printf 'Cancelled.\n'
+    return 1
+  fi
+  if ! [[ "$input" =~ ^[0-9]+$ ]]; then
+    printf 'Invalid: must be an integer number of milliseconds.\n'
+    return 1
+  fi
+  if test "$input" -lt 100; then
+    printf 'Invalid: must be at least 100ms.\n'
+    return 1
+  fi
+  if test "$input" -gt 5000; then
+    printf 'Invalid: must be at most 5000ms.\n'
+    return 1
+  fi
+  if test "$input" -gt 2500; then
+    read -r -p "Large value ${input}ms. Type YES to confirm: " confirm
+    if test "$confirm" != "YES"; then
+      printf 'Cancelled.\n'
+      return 1
+    fi
+  fi
+  REPLY_MS="$input"
+  return 0
+}
+
+# Read an E interval in ms (smaller range than movement: 1-1000ms).
+read_valid_e_interval_ms() {
+  local label="$1" input
+  REPLY_MS=""
+  read -r -p "$label (integer ms 1-1000, blank to cancel): " input
+  if test -z "$input"; then
+    printf 'Cancelled.\n'
+    return 1
+  fi
+  if ! [[ "$input" =~ ^[0-9]+$ ]]; then
+    printf 'Invalid: must be an integer number of milliseconds.\n'
+    return 1
+  fi
+  if test "$input" -lt 1 || test "$input" -gt 1000; then
+    printf 'Invalid: E interval must be between 1 and 1000ms.\n'
+    return 1
+  fi
+  REPLY_MS="$input"
+  return 0
+}
+
+# --- Menu actions ------------------------------------------------------------
+
+action_set_forward() {
+  if read_valid_duration_ms "New forward walk duration"; then
+    tuner_set PLACE_FORWARD_DURATION "$(ms_to_duration "$REPLY_MS")"
+    printf 'Forward walk set to %sms (%s).\n' "$REPLY_MS" "$(ms_to_duration "$REPLY_MS")"
+  fi
+}
+
+action_set_left() {
+  if read_valid_duration_ms "New left walk duration"; then
+    tuner_set PLACE_LEFT_DURATION "$(ms_to_duration "$REPLY_MS")"
+    printf 'Left walk set to %sms (%s).\n' "$REPLY_MS" "$(ms_to_duration "$REPLY_MS")"
+  fi
+}
+
+action_set_both() {
+  local fwd
+  if ! read_valid_duration_ms "New forward walk duration"; then
+    return
+  fi
+  fwd="$REPLY_MS"
+  if ! read_valid_duration_ms "New left walk duration"; then
+    printf 'Aborted: forward not changed.\n'
+    return
+  fi
+  tuner_set PLACE_FORWARD_DURATION "$(ms_to_duration "$fwd")"
+  tuner_set PLACE_LEFT_DURATION "$(ms_to_duration "$REPLY_MS")"
+  printf 'Forward set to %sms (%s), left set to %sms (%s).\n' \
+    "$fwd" "$(ms_to_duration "$fwd")" "$REPLY_MS" "$(ms_to_duration "$REPLY_MS")"
+}
+
+action_set_e_interval() {
+  if read_valid_e_interval_ms "New E interval"; then
+    tuner_set PLACE_LIVE_E_INTERVAL "$(ms_to_duration "$REPLY_MS")"
+    printf 'E interval set to %sms (%s).\n' "$REPLY_MS" "$(ms_to_duration "$REPLY_MS")"
+  fi
+}
+
+action_toggle_e() {
+  local cur
+  cur="$(tuner_get PLACE_LIVE_E_ENABLED)"
+  if test "$cur" = "1"; then
+    tuner_set PLACE_LIVE_E_ENABLED 0
+    printf 'E presses DISABLED (PLACE_LIVE_E_ENABLED=0).\n'
+  else
+    tuner_set PLACE_LIVE_E_ENABLED 1
+    printf 'E presses ENABLED (PLACE_LIVE_E_ENABLED=1).\n'
+  fi
+}
+
+ensure_csv() {
+  if ! test -f "$CSV_FILE"; then
+    mkdir -p "$(dirname "$CSV_FILE")"
+    printf 'timestamp,forward_ms,left_ms,e_enabled,e_interval_ms,click_burst_delay,pack_count,elapsed_ms,log_file,notes\n' > "$CSV_FILE"
+  fi
+}
+
+# Strip commas/newlines so a free-text field is CSV-safe.
+csv_clean() {
+  printf '%s' "$1" | tr ',\n\r' ';  ' | sed -E 's/ +$//'
+}
+
+action_dry_run() {
+  local ts log
+  ts="$(date +%Y%m%d-%H%M%S)"
+  log="$LOG_DIR/walk_tuner_dry_run_${ts}.txt"
+  mkdir -p "$LOG_DIR"
+  printf 'Dry-run command:\n'
+  printf '  %s dry-run live-cycle --cycles 1 --no-potions\n\n' "$MACROCTL"
+  "$MACROCTL" dry-run live-cycle --cycles 1 --no-potions 2>&1 | tee "$log"
+  printf '\nDry-run output saved to: %s\n' "$log"
+}
+
+action_live_test() {
+  local e_en ts log start_ms end_ms elapsed_ms confirm
+  local fwd_ms left_ms e_int_ms burst_ms pack_count notes
+
+  printf '\n==================== LIVE TEST (ONE CYCLE) ====================\n'
+  printf 'WARNING: Sober / Gamescope must be focused and READY before you run.\n'
+  printf 'This runs exactly ONE live cycle and skips potions (--no-potions).\n\n'
+
+  e_en="$(tuner_get PLACE_LIVE_E_ENABLED)"
+  if test "$e_en" != "1"; then
+    printf 'E is disabled. This test will not include E presses.\n'
+    read -r -p 'Enable E for this run? [y/N]: ' confirm
+    if test "$confirm" = "y" || test "$confirm" = "Y"; then
+      tuner_set PLACE_LIVE_E_ENABLED 1
+      e_en="1"
+      printf 'E presses ENABLED for this run.\n'
+    fi
+  fi
+
+  printf '\nExact command to be run:\n'
+  printf '  MACRO_INPUT_MODE=live \\\n'
+  printf '  MACRO_LIVE_INPUT_ALLOWED=1 \\\n'
+  printf '  MACRO_LIVE_CYCLE_RUNNER_CONFIRM=YES \\\n'
+  printf '  %s live live-cycle --cycles 1 --no-potions\n\n' "$MACROCTL"
+
+  read -r -p 'Type RUN to start one live test: ' confirm
+  if test "$confirm" != "RUN"; then
+    printf 'Live test cancelled (you did not type RUN).\n'
+    return
+  fi
+
+  ts="$(date +%Y%m%d-%H%M%S)"
+  log="$LOG_DIR/walk_tuner_live_${ts}.txt"
+  mkdir -p "$LOG_DIR"
+
+  start_ms="$(date +%s%3N)"
+  MACRO_INPUT_MODE=live \
+  MACRO_LIVE_INPUT_ALLOWED=1 \
+  MACRO_LIVE_CYCLE_RUNNER_CONFIRM=YES \
+    "$MACROCTL" live live-cycle --cycles 1 --no-potions 2>&1 | tee "$log"
+  end_ms="$(date +%s%3N)"
+  elapsed_ms=$((end_ms - start_ms))
+
+  printf 'elapsed_ms=%s\n' "$elapsed_ms" >> "$log"
+  printf '\nLive test output saved to: %s\n' "$log"
+  printf 'Elapsed: %sms\n' "$elapsed_ms"
+
+  if command -v wl-copy >/dev/null 2>&1; then
+    wl-copy < "$log" && printf 'Log copied to clipboard (wl-copy).\n'
+  else
+    printf 'wl-copy not found; skipping clipboard copy.\n'
+  fi
+
+  # Snapshot the settings that were live for this run.
+  fwd_ms="$(to_ms "$(tuner_get PLACE_FORWARD_DURATION)")"
+  left_ms="$(to_ms "$(tuner_get PLACE_LEFT_DURATION)")"
+  e_int_ms="$(to_ms "$(tuner_get PLACE_LIVE_E_INTERVAL)")"
+  burst_ms="$(to_ms "$(tuner_get PLACE_LIVE_CLICK_BURST_DELAY)")"
+
+  printf '\nLog the result of this test:\n'
+  read -r -p 'Packs placed: ' pack_count
+  read -r -p 'Notes: ' notes
+
+  ensure_csv
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$ts" "$fwd_ms" "$left_ms" "$e_en" "$e_int_ms" "$burst_ms" \
+    "$(csv_clean "$pack_count")" "$elapsed_ms" "$log" "$(csv_clean "$notes")" \
+    >> "$CSV_FILE"
+  printf 'Result appended to %s\n' "$CSV_FILE"
+}
+
+action_record_manual() {
+  local ts fwd_ms left_ms e_en e_int_ms burst_ms pack_count notes
+  ts="$(date +%Y%m%d-%H%M%S)"
+  fwd_ms="$(to_ms "$(tuner_get PLACE_FORWARD_DURATION)")"
+  left_ms="$(to_ms "$(tuner_get PLACE_LEFT_DURATION)")"
+  e_en="$(tuner_get PLACE_LIVE_E_ENABLED)"
+  e_int_ms="$(to_ms "$(tuner_get PLACE_LIVE_E_INTERVAL)")"
+  burst_ms="$(to_ms "$(tuner_get PLACE_LIVE_CLICK_BURST_DELAY)")"
+
+  printf 'Record a result for the CURRENT settings (no test is run):\n'
+  read -r -p 'Packs placed: ' pack_count
+  read -r -p 'Notes: ' notes
+
+  ensure_csv
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$ts" "$fwd_ms" "$left_ms" "$e_en" "$e_int_ms" "$burst_ms" \
+    "$(csv_clean "$pack_count")" "" "manual" "$(csv_clean "$notes")" \
+    >> "$CSV_FILE"
+  printf 'Result appended to %s\n' "$CSV_FILE"
+}
+
+action_show_results() {
+  if ! test -f "$CSV_FILE"; then
+    printf 'No results recorded yet (%s does not exist).\n' "$CSV_FILE"
+    return
+  fi
+  printf 'Recent results (%s):\n\n' "$CSV_FILE"
+  head -n1 "$CSV_FILE"
+  tail -n +2 "$CSV_FILE" | tail -n 10
+}
+
+action_backup() {
+  local ts dest
+  mkdir -p "$PATCH_DIR"
+  ts="$(date +%Y%m%d-%H%M%S)"
+  dest="$PATCH_DIR/timing.walk_tuner_backup.${ts}.conf"
+  cp "$RUNTIME_TIMING" "$dest"
+  printf 'Backed up runtime timing config to:\n  %s\n' "$dest"
+}
+
+action_restore() {
+  local files=() f choice idx
+  mkdir -p "$PATCH_DIR"
+  shopt -s nullglob
+  files=( "$PATCH_DIR"/timing.walk_tuner_backup.*.conf )
+  shopt -u nullglob
+  if test "${#files[@]}" -eq 0; then
+    printf 'No walk_tuner backups found in %s\n' "$PATCH_DIR"
+    return
+  fi
+  # Show newest first.
+  IFS=$'\n' files=($(printf '%s\n' "${files[@]}" | sort -r))
+  unset IFS
+  printf 'Recent walk_tuner backups:\n'
+  idx=1
+  for f in "${files[@]}"; do
+    printf '  %s) %s\n' "$idx" "$(basename "$f")"
+    idx=$((idx + 1))
+  done
+  read -r -p 'Restore which number? (blank to cancel): ' choice
+  if test -z "$choice"; then
+    printf 'Cancelled.\n'
+    return
+  fi
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || test "$choice" -lt 1 || test "$choice" -gt "${#files[@]}"; then
+    printf 'Invalid selection.\n'
+    return
+  fi
+  cp "${files[$((choice - 1))]}" "$RUNTIME_TIMING"
+  printf 'Restored %s -> %s\n' "$(basename "${files[$((choice - 1))]}")" "$RUNTIME_TIMING"
+}
+
+# --- Menu loop ---------------------------------------------------------------
+
+show_menu() {
+  printf '\nMenu:\n'
+  printf '  1) Set forward duration\n'
+  printf '  2) Set left duration\n'
+  printf '  3) Set both durations\n'
+  printf '  4) Set E interval\n'
+  printf '  5) Toggle E enabled\n'
+  printf '  6) Dry-run current settings\n'
+  printf '  7) Run one live test with current settings\n'
+  printf '  8) Record result manually\n'
+  printf '  9) Show recent results\n'
+  printf '  b) Backup current runtime timing config\n'
+  printf '  r) Restore most recent tuner backup\n'
+  printf '  q) Quit\n'
+}
+
+menu_loop() {
+  local choice
+  while true; do
+    clear 2>/dev/null || true
+    print_current
+    show_menu
+    read -r -p 'Select: ' choice
+    printf '\n'
+    case "$choice" in
+      1) action_set_forward ;;
+      2) action_set_left ;;
+      3) action_set_both ;;
+      4) action_set_e_interval ;;
+      5) action_toggle_e ;;
+      6) action_dry_run ;;
+      7) action_live_test ;;
+      8) action_record_manual ;;
+      9) action_show_results ;;
+      b|B) action_backup ;;
+      r|R) action_restore ;;
+      q|Q) printf 'Bye.\n'; return 0 ;;
+      *) printf 'Unknown option: %s\n' "$choice" ;;
+    esac
+    printf '\nPress Enter to continue...'
+    read -r _
+  done
+}
+
+usage() {
+  cat <<EOF
+Usage: walk-tuner [OPTION]
+
+A terminal UI for tuning Sober Pack Opener forward/left walking durations.
+With no option it launches the interactive menu.
+
+Options:
+  --help            Show this help and exit.
+  --print-current   Print current runtime timing settings and exit.
+  --dry-run-once    Run one dry-run live cycle (--no-potions) and exit.
+
+The interactive menu lets you:
+  1) Set forward duration        6) Dry-run current settings
+  2) Set left duration           7) Run one live test (one cycle, --no-potions)
+  3) Set both durations          8) Record result manually
+  4) Set E interval              9) Show recent results
+  5) Toggle E enabled            b) Backup   r) Restore   q) Quit
+
+Notes:
+  * Only edits: PLACE_FORWARD_DURATION, PLACE_LEFT_DURATION,
+    PLACE_LIVE_E_ENABLED, PLACE_LIVE_E_INTERVAL in the runtime timing config.
+  * The live test runs exactly one cycle, skips potions, includes E presses when
+    E is enabled, and requires you to type RUN to start.
+  * This tool never calls xdotool/ydotool directly; live input only runs through
+    the existing macroctl command.
+EOF
+}
+
+main() {
+  ensure_runtime
+
+  case "${1:-}" in
+    --help|-h)
+      usage
+      ;;
+    --print-current)
+      print_current
+      ;;
+    --dry-run-once)
+      action_dry_run
+      ;;
+    "")
+      menu_loop
+      ;;
+    *)
+      printf 'Unknown option: %s\n\n' "$1" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"

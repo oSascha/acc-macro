@@ -1,0 +1,1395 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ui_script="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  resolved_ui_script="$(readlink -f "$ui_script" 2>/dev/null || printf '%s' "$ui_script")"
+else
+  resolved_ui_script="$ui_script"
+fi
+ui_bin_dir="$(cd "${resolved_ui_script%/*}" && pwd -P)"
+PROJECT_ROOT="${ui_bin_dir%/bin}"
+MACRO_PROJECT_ROOT="$PROJECT_ROOT"
+
+RUNTIME_DIR="$PROJECT_ROOT/runtime_config/pack_opener"
+TIMING_FILE="$RUNTIME_DIR/timing.conf"
+POTION_PLAN_FILE="$RUNTIME_DIR/potion_plan.conf"
+POINTS_FILE="$RUNTIME_DIR/points.conf"
+MARKET_BUYER_POINTS_FILE="$PROJECT_ROOT/runtime_config/market_buyer/points.conf"
+FIGURINES_BUYER_POINTS_FILE="$PROJECT_ROOT/runtime_config/figurines_buyer/points.conf"
+LOG_DIR="$PROJECT_ROOT/05_debug_snapshots/logs"
+MACROCTL="$PROJECT_ROOT/bin/macroctl"
+
+# shellcheck source=../src/lib/orchestrator_control.sh
+. "$PROJECT_ROOT/src/lib/orchestrator_control.sh"
+
+interactive=0
+if test -t 0 && test -t 1; then
+  interactive=1
+fi
+
+colors_enabled=0
+if test -t 1 && test -z "${NO_COLOR:-}"; then
+  colors_enabled=1
+fi
+
+if test "$colors_enabled" -eq 1; then
+  RESET=$'\033[0m'
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  CYAN=$'\033[96m'
+  MAGENTA=$'\033[95m'
+  GREEN=$'\033[92m'
+  YELLOW=$'\033[93m'
+  RED=$'\033[91m'
+  GREY=$'\033[90m'
+else
+  RESET=''
+  BOLD=''
+  DIM=$''
+  CYAN=''
+  MAGENTA=''
+  GREEN=''
+  YELLOW=''
+  RED=''
+  GREY=''
+fi
+
+use_animation=0
+if test "$interactive" -eq 1 && test "${ACC_NO_ANIMATION:-}" != "1"; then
+  use_animation=1
+fi
+
+status_label="READY"
+ACC_STOP_REQUESTED=0
+_acc_full_macro_orch_pid=""
+
+# Session-state module toggles (1 = enabled, 0 = disabled)
+# Changed in module_toggles_loop(); passed as env vars to orchestrator.
+TOGGLE_PACK_OPENER=1
+TOGGLE_MARKET_BUYER=1
+TOGGLE_FIGURINES_BUYER=1
+TOGGLE_STAR_TRIALS=0
+TOGGLE_RECOVERY_RESTART=0
+
+# Recovery config paths (read-only helpers for UI display)
+RECOVERY_RUNTIME_DIR="$PROJECT_ROOT/runtime_config/recovery"
+RECOVERY_DEFAULTS_FILE_UI="$RECOVERY_RUNTIME_DIR/defaults.conf"
+RECOVERY_POINTS_FILE_UI="$RECOVERY_RUNTIME_DIR/points.conf"
+
+usage() {
+  cat <<EOF
+Usage: $0 [option]
+
+ACC // PACK OPENER — Auto Cycle Controller
+
+Options:
+  --help              Show this help.
+  --status            Show current status and exit.
+  --dry-run-cycles N  Test without clicking for 1, 2, or 3 cycles.
+  --print-latest-logs Show the latest saved logs and exit.
+  --art               Show ACC art and exit.
+
+Without options, opens the ACC menu.
+Live runs are only available from the menu and require typed confirmation.
+EOF
+}
+
+config_get() {
+  local file="$1"
+  local key="$2"
+  local line
+
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n1)" || true
+  if test -z "$line"; then
+    return 1
+  fi
+  printf '%s' "${line#*=}"
+}
+
+point_value() {
+  local name="$1"
+  local x
+  local y
+
+  x="$(config_get "$POINTS_FILE" "${name}_X" || true)"
+  y="$(config_get "$POINTS_FILE" "${name}_Y" || true)"
+  if test -n "$x" && test -n "$y"; then
+    printf '%s,%s' "$x" "$y"
+  else
+    printf '<unset>'
+  fi
+}
+
+timing_value() {
+  local key="$1"
+  config_get "$TIMING_FILE" "$key" || printf '<unset>'
+}
+
+plan_value() {
+  local key="$1"
+  config_get "$POTION_PLAN_FILE" "$key" || printf '<unset>'
+}
+
+on_off() {
+  case "${1:-}" in
+    1) printf 'on' ;;
+    0) printf 'off' ;;
+    *) printf '%s' "${1:-<unset>}" ;;
+  esac
+}
+
+recovery_config_get() {
+  local key="$1"
+  local val
+  val="$(config_get "$RECOVERY_DEFAULTS_FILE_UI" "$key" 2>/dev/null || true)"
+  if test -z "$val"; then
+    val="$(config_get "$RECOVERY_POINTS_FILE_UI" "$key" 2>/dev/null || true)"
+  fi
+  printf '%s' "$val"
+}
+
+recovery_url_configured() {
+  local url
+  url="$(recovery_config_get RECOVERY_PRIVATE_SERVER_URL)"
+  test -n "$url"
+}
+
+recovery_required_points_configured() {
+  local key val
+  for key in RECOVERY_POPUP_CLOSE_BUTTON_X RECOVERY_POPUP_CLOSE_BUTTON_Y \
+             RECOVERY_ITEMS_TAB_BUTTON_X RECOVERY_ITEMS_TAB_BUTTON_Y; do
+    val="$(config_get "$RECOVERY_POINTS_FILE_UI" "$key" 2>/dev/null || true)"
+    if test -z "$val"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+recovery_module_label() {
+  local toggle="$1"
+  local name="$2"
+  if test "$toggle" != "1"; then
+    printf '%s[OFF          ]%s %s\n' "$YELLOW" "$RESET" "$name"
+  elif recovery_url_configured && recovery_required_points_configured; then
+    printf '%s[READY        ]%s %s\n' "$GREEN" "$RESET" "$name"
+  else
+    printf '%s[NEEDS CONFIG ]%s %s\n' "$RED" "$RESET" "$name"
+  fi
+}
+
+clear_screen() {
+  if test "$interactive" -eq 1; then
+    printf '\033[2J\033[H'
+  fi
+}
+
+pause_return() {
+  if test "$interactive" -eq 1; then
+    printf '\nPress Enter to return.'
+    read -r _unused
+  fi
+}
+
+terminal_width() {
+  local w
+  w="$(tput cols 2>/dev/null)" || w=80
+  printf '%s' "$w"
+}
+
+small_logo() {
+  printf '%s   ___   ______ ______%s\n' "$CYAN" "$RESET"
+  printf '%s  / _ | / ___/ // / _ \\%s\n' "$CYAN" "$RESET"
+  printf '%s / __ |/ /__/ _  / ___/%s\n' "$CYAN" "$RESET"
+  printf '%s/_/ |_|\\___/_//_/_/%s\n' "$CYAN" "$RESET"
+  printf '%sAUTO CYCLE CONTROLLER%s\n' "$GREY" "$RESET"
+}
+
+print_art() {
+  printf '%s' "$CYAN"
+  cat <<'EOF'
+   ___   ______ ______
+  / _ | / ___/ // / _ \
+ / __ |/ /__/ _  / ___/
+/_/ |_|\___/_//_/_/
+
+AUTO CYCLE CONTROLLER
+EOF
+  printf '%s\n' "$RESET"
+  printf '%sACC // PACK OPENER%s\n' "$MAGENTA" "$RESET"
+  printf '%sSOBER / GAMESCOPE LIVE CONTROL%s\n' "$GREY" "$RESET"
+}
+
+show_startup_eyes() {
+  local cols pad_count pad
+  cols="$(terminal_width)"
+  pad_count=$(( (cols - 50) / 2 ))
+  [ "$pad_count" -lt 0 ] && pad_count=0
+  pad="$(printf '%*s' "$pad_count" '')"
+
+  printf '%s' "$MAGENTA"
+  printf '%s%s\n' "$pad" '⠤⣤⣤⣤⣄⣀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⣠⣤⠤⠤⠴⠶⠶⠶⠶'
+  printf '%s%s\n' "$pad" '⢠⣤⣤⡄⣤⣤⣤⠄⣀⠉⣉⣙⠒⠤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⠴⠘⣉⢡⣤⡤⠐⣶⡆⢶⠀⣶⣶⡦'
+  printf '%s' "$CYAN"
+  printf '%s%s\n' "$pad" '⣄⢻⣿⣧⠻⠇⠋⠀⠋⠀⢘⣿⢳⣦⣌⠳⠄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠞⣡⣴⣧⠻⣄⢸⣿⣿⡟⢁⡻⣸⣿⡿⠁'
+  printf '%s%s\n' "$pad" '⠈⠃⠙⢿⣧⣙⠶⣿⣿⡷⢘⣡⣿⣿⣿⣷⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣾⣿⣿⣿⣷⣝⡳⠶⠶⠾⣛⣵⡿⠋⠀⠀'
+  printf '%s' "$MAGENTA"
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠉⠻⣿⣶⠂⠘⠛⠛⠛⢛⡛⠋⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠛⠀⠉⠒⠛⠀⠀⠀⠀⠀'
+  printf '%s' "$GREY"
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⣿⡇⠀⠀⠀⠀⠀⢸⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⣿⡇⠀⠀⠀⠀⠀⣾⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⣿⡇⠀⠀⠀⠀⠀⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⢻⡁⠀⠀⠀⠀⠀⢸⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠘⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s\n' "$RESET"
+}
+
+show_running_side_profile() {
+  local cols pad_count pad
+  cols="$(terminal_width)"
+  pad_count=$(( (cols - 48) / 2 ))
+  [ "$pad_count" -lt 0 ] && pad_count=0
+  pad="$(printf '%*s' "$pad_count" '')"
+
+  clear_screen
+  printf '%s' "$MAGENTA"
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡟⢰⠀⠀⠀⠀⠀⠀⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢡⠠⠀⠀⡇⣯⡄⢀⢀⢰⠢⡀⢣⠘⡄⠀⢀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⠀⠀⠀⢂⠑⡀⡇⢿⠐⡈⠪⠄⣧⣐⣄⠿⡱⢄⠀⢺⠤⢀⢰⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡤⣀⠀⠑⢦⡤⢤⣥⡬⢧⠼⢧⠬⠯⡙⣷⣖⠧⡙⣒⣧⠵⣀⠩⣢⢿⣌⢓⢄⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s' "$CYAN"
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠐⢄⠳⡌⠙⠡⣍⡓⠦⣌⠭⢬⣤⣡⠐⢎⢼⠷⢞⣼⣬⣱⣽⣲⢫⢻⢕⣍⠣⡱⡽⡲⡠⣀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⡀⢕⡢⢈⠣⡾⢌⡃⠠⢘⣧⣋⠙⠦⡭⢭⡝⠶⣳⠷⢮⣽⣶⣷⣭⣹⢷⡷⣿⣯⣷⡨⢶⣿⣵⢌⡦⡀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⢀⢈⠢⣹⣢⣨⠖⢍⡒⠶⠨⣡⣒⣷⣶⣭⡗⣚⠚⡭⠝⠴⠦⣤⠍⣛⣓⢯⣬⣿⣽⣽⡿⣿⣿⣮⣾⡽⢷⣲⢱⡀⢀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠈⢋⢼⢽⢯⢦⡙⣓⠞⡛⣳⣙⣾⣭⣧⣄⣀⠤⠐⠒⠉⠊⠙⢛⣿⣟⣯⣾⣭⣻⣮⣻⣿⣿⣿⣿⣿⣦⠘⣞⡌⡿⣼'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⣱⢻⡔⢤⣉⣐⣤⣋⣥⡤⣽⡷⠒⠌⡀⢀⣠⡤⠚⢈⣉⡴⠯⠛⠻⢃⢛⣻⣿⣷⣿⣿⡿⣿⣿⣿⣧⣿⣶⣲⢻'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠑⠺⢅⣝⣛⣥⣍⡁⢀⣉⣠⣴⠞⣋⣽⠡⢴⠾⣋⡡⢄⣲⣈⠭⠙⠛⣻⣿⣿⣷⣿⣿⣽⣿⣿⣿⣿⣿⣿⣿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠒⡤⢤⢶⠚⣋⡩⢤⣖⣍⣉⣾⢋⣬⣛⣷⡿⠋⣨⣕⣦⠓⠁⠀⣀⠴⢎⣉⠵⢛⣻⣩⣽⣿⣿⣿⣿⣿⣿⣋⣟'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⣴⣙⡽⣯⡝⣋⣡⣴⣤⢿⢡⣿⣿⡿⢊⣤⠾⠋⡩⠂⢀⣴⡫⠕⣊⠕⢁⠔⢁⡼⠋⠁⡁⣸⣿⣿⣿⣿⣛⣿'
+  printf '%s' "$MAGENTA"
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⡇⠀⠀⠀⢠⡀⢸⡻⡴⣷⣩⡟⠩⡠⢊⡠⣰⠟⢁⠄⠊⢀⡴⠋⠔⠉⠀⡘⢰⢀⣿⣿⣿⣿⣿⣿⣿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢡⢠⡄⠀⠀⡘⢩⠗⢪⢋⡟⣐⠥⠶⣹⠼⠑⢈⣀⣴⠜⢁⠀⠀⢠⡕⣽⠀⣟⣾⣿⢻⢻⣿⣿⣿⣿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⠚⡁⠋⠀⠠⡦⠢⠴⢥⣎⣜⣡⣶⣾⣶⣾⣿⣭⣽⣠⠴⢃⣔⣪⡞⣱⣷⠸⣼⣟⣧⣟⣼⣟⣿⣿⣿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⡟⣷⡀⠀⠀⠀⣧⢠⡔⢋⣡⣾⣿⣿⢻⡏⠛⢻⣿⡟⢁⣴⣫⢻⣿⣲⣿⣾⡀⣷⣛⡟⣬⣿⢹⣿⣿⣿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⡾⣛⠻⢿⣦⠀⠀⠈⠈⢡⡜⣿⡿⠟⡿⠃⠀⣄⢳⣿⡿⣿⢿⡿⣿⣽⣿⣿⡿⣧⣿⣿⣷⣿⠛⢸⣿⣿⣿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⣡⠻⡷⣦⡿⠆⠀⠀⢠⣦⠀⢸⡅⠰⠃⠘⣦⡾⣧⡏⡄⢣⡄⣀⣿⣛⣬⡅⣶⣿⣿⣿⣿⢹⡄⣻⣿⣯⣿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⡠⠃⠀⢧⠀⣳⡀⠀⢠⣾⡿⠆⢈⣣⠀⠀⠀⡞⠃⠻⢀⠀⢾⣧⣉⣛⣉⣤⣶⣿⡟⠸⡌⢾⠀⣣⣿⡏⢫⡿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⣾⣀⠀⠀⠙⠃⠘⠃⠠⣼⡇⠀⠀⢨⡖⠀⠀⠀⠁⠀⠀⠈⠁⠈⠻⢿⣿⣿⣿⠟⡹⠶⠁⡓⡘⣆⠿⠡⢠⡏⡿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠈⠺⢗⣦⣄⣀⠀⠀⠀⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⠤⠀⠀⠀⠀⣫⣿⣿⣿⠀⢧⢸⠀⡿⢰⢣⢸⡇⡜⣸⣼'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⢮⣿⡟⡿⣿⡿⣿⡿⣿⠿⢻⡿⠟⢉⠀⠔⠁⠀⠀⠀⢿⣹⡟⣿⡄⣽⣿⢃⢣⢸⣮⢿⢼⢡⣿⣿'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⢻⣧⣵⣾⣾⣿⠿⢻⠇⢀⠔⠁⠀⡜⠐⠀⠄⢐⣿⣎⣿⡹⢷⡄⣿⣿⣼⢿⡟⢹⢀⣡⡽⣽'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢻⠀⣠⡾⢁⣴⣏⡠⠊⠀⡠⠊⠀⠀⣄⣀⣼⣇⠫⢢⡧⢘⣧⡽⣬⢷⡞⡷⡠⢳⢾⠣⡼'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⠖⠁⠀⢀⠟⡹⠋⠁⣴⠁⠀⠀⠀⣸⡟⠀⢦⣁⣬⢡⠷⣫⢵⡘⠸⠇⡷⠯⡍⠸⡔⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢘⡄⠀⠀⣼⣚⣁⣀⣞⣉⣀⣀⣴⣯⣾⣧⣴⣾⣿⣿⠊⠀⠈⠃⠹⠃⠀⠣⠀⠀⠀⢷⠤'
+  printf '%s' "$GREY"
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢰⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣴⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⠀⠀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⡀⠀⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⠀⠀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡆⠀⠀⠀⠀⠀⠀⠀'
+  printf '%s%s\n' "$pad" '⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⡀⠀⠀⠀⠀⠀⠀'
+  printf '%s\n' "$RESET"
+}
+
+startup_pulse() {
+  if test "$use_animation" -ne 1; then
+    return
+  fi
+  clear_screen
+  show_startup_eyes
+  printf '%sACC LINKING.  %s\r' "$CYAN" "$RESET"
+  sleep 0.3
+  printf '%sACC LINKING.. %s\r' "$CYAN" "$RESET"
+  sleep 0.3
+  printf '%sACC LINKING...%s\r' "$CYAN" "$RESET"
+  sleep 0.3
+  printf '%sACC READY     %s\n' "$GREEN" "$RESET"
+  sleep 0.5
+}
+
+status_color() {
+  case "$1" in
+    READY) printf '%s' "$CYAN" ;;
+    "DRY RUN") printf '%s' "$YELLOW" ;;
+    "LIVE ARMED") printf '%s' "$MAGENTA" ;;
+    RUNNING) printf '%s' "$CYAN" ;;
+    COMPLETE) printf '%s' "$GREEN" ;;
+    FAILED) printf '%s' "$RED" ;;
+    STOPPED) printf '%s' "$YELLOW" ;;
+    *) printf '%s' "$RESET" ;;
+  esac
+}
+
+# ── Main menu ─────────────────────────────────────────────────────────────────
+
+main_menu() {
+  local potion_state
+  potion_state="$(on_off "$(plan_value POTION_PLAN_ENABLED)")"
+
+  clear_screen
+  small_logo
+  printf '%s╔══════════════════════════════════════════════════════════════╗%s\n' "$MAGENTA" "$RESET"
+  printf '%s║%s  %sACC // PACK OPENER%s                                         %s║%s\n' "$MAGENTA" "$RESET" "$BOLD$CYAN" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  %sSober / Gamescope Live Control%s                            %s║%s\n' "$MAGENTA" "$RESET" "$GREY" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s╠══════════════════════════════════════════════════════════════╣%s\n' "$MAGENTA" "$RESET"
+  printf '%s║%s  Pack Opener: %s%-8s%s  Potions: %-3s  Cycle: base→potion→pack %s║%s\n' \
+    "$MAGENTA" "$RESET" "$(status_color "$status_label")" "$status_label" "$RESET" "$potion_state" "$MAGENTA" "$RESET"
+  printf '%s║%s  Stop: %sCtrl+C%s while running                                %s║%s\n' "$MAGENTA" "$RESET" "$YELLOW" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s╠══════════════════════════════════════════════════════════════╣%s\n' "$MAGENTA" "$RESET"
+  printf '%s║%s  %s1) Start Full Macro%s                                        %s║%s\n' "$MAGENTA" "$RESET" "$BOLD" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  2) Module toggles                                         %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  3) Macro status                                           %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  4) Macro modules                                          %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  5) Advanced / Testing / Calibration                       %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  q) Quit                                                   %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s╚══════════════════════════════════════════════════════════════╝%s\n' "$MAGENTA" "$RESET"
+  printf '\nChoose: '
+}
+
+# ── Advanced / Testing / Calibration submenu ──────────────────────────────────
+
+advanced_menu() {
+  clear_screen
+  small_logo
+  printf '%s╔══════════════════════════════════════════════════════════════╗%s\n' "$MAGENTA" "$RESET"
+  printf '%s║%s  %sADVANCED / TESTING / CALIBRATION%s                          %s║%s\n' "$MAGENTA" "$RESET" "$BOLD$CYAN" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s╠══════════════════════════════════════════════════════════════╣%s\n' "$MAGENTA" "$RESET"
+  printf '%s║%s  1)  Show status                                           %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  2)  Test without clicking %s(dry run, 1 cycle)%s              %s║%s\n' "$MAGENTA" "$RESET" "$GREY" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  3)  Run once                                              %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  4)  Run twice                                             %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  5)  Run three times                                       %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  6)  Run with timing trace %s(dry run, 1 cycle)%s              %s║%s\n' "$MAGENTA" "$RESET" "$GREY" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  7)  Potion settings                                       %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  8)  Calibrate buttons                                     %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  9)  Adjust walking path                                   %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  10) Show latest logs                                      %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  11) Project status                                        %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  b)  Back                                                  %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s╚══════════════════════════════════════════════════════════════╝%s\n' "$MAGENTA" "$RESET"
+  printf '\nChoose: '
+}
+
+# ── Status / info screens ─────────────────────────────────────────────────────
+
+changed_summary() {
+  local out
+  out="$(git -C "$PROJECT_ROOT" status --short 2>/dev/null || true)"
+  if test -z "$out"; then
+    printf 'clean'
+  else
+    printf 'has changes'
+  fi
+}
+
+print_status_screen() {
+  local branch
+  local commit
+
+  branch="$(git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || printf '<unknown>')"
+  commit="$(git -C "$PROJECT_ROOT" log -1 --oneline 2>/dev/null || printf '<unknown>')"
+
+  printf '%sACC STATUS%s\n\n' "$BOLD$CYAN" "$RESET"
+  printf '%sMacro:%s\n' "$MAGENTA" "$RESET"
+  printf '%s\n' '- Mode: Full Macro (orchestrator)'
+  printf '%s\n' '- Pack cycle: base → potion → pack (one at a time)'
+  printf '%s\n' '- Buyer schedule: Market Buyer → Figurines Buyer every 10 minutes'
+  printf '%s\n' '- Stop: Ctrl+C'
+  printf '%s\n\n' '- One cycle: go to base, use potions, walk and place packs'
+  printf '%sModule toggles (this session):%s\n' "$MAGENTA" "$RESET"
+  printf '%s\n' "- Pack Opener:     $(on_off "$TOGGLE_PACK_OPENER")"
+  printf '%s\n' "- Market Buyer:    $(on_off "$TOGGLE_MARKET_BUYER")"
+  printf '%s\n' "- Figurines Buyer: $(on_off "$TOGGLE_FIGURINES_BUYER")"
+  printf '%s\n' '- Star Trials:     OFF (imported/legacy — not available for live runs)'
+  printf '%s\n\n' "- Recovery Restart: $(on_off "$TOGGLE_RECOVERY_RESTART")"
+
+  printf '%sRecovery Restart:%s\n' "$MAGENTA" "$RESET"
+  local rec_interval rec_wait rec_url_status rec_points_status
+  rec_interval="$(recovery_config_get RECOVERY_INTERVAL_MINUTES)"
+  rec_wait="$(recovery_config_get RECOVERY_POST_LAUNCH_WAIT)"
+  printf '%s\n' "- Enabled (this session): $(on_off "$TOGGLE_RECOVERY_RESTART")"
+  printf '%s\n' "- Interval: ${rec_interval:-120} minutes"
+  printf '%s\n' "- Post-launch wait: ${rec_wait:-10m}"
+  if recovery_url_configured; then
+    rec_url_status="[configured]"
+  else
+    rec_url_status="<not configured — set RECOVERY_PRIVATE_SERVER_URL in runtime_config/recovery/defaults.conf>"
+  fi
+  printf '%s\n' "- Private server URL: $rec_url_status"
+  if recovery_required_points_configured; then
+    rec_points_status="configured"
+  else
+    rec_points_status="<not configured — set RECOVERY_POPUP_CLOSE_BUTTON_X/Y and RECOVERY_ITEMS_TAB_BUTTON_X/Y in runtime_config/recovery/points.conf>"
+  fi
+  printf '%s\n\n' "- Recovery points: $rec_points_status"
+
+  printf '%sPotions:%s\n' "$MAGENTA" "$RESET"
+  printf '%s\n' "- Potions: $(on_off "$(plan_value POTION_PLAN_ENABLED)")"
+  printf '%s\n' "- 2-minute amount: $(plan_value POTION_2_MIN_USE_AMOUNT)"
+  printf '%s\n' "- Potion click speed: $(plan_value POTION_CLICK_INTERVAL)"
+  printf '%s\n' "- Base-to-inventory wait: $(timing_value POTION_PRE_MENU_CLICK_WAIT)"
+  printf '%s\n\n' "- Inventory-to-potion wait: $(timing_value POST_INVENTORY_OPEN_WAIT)"
+
+  printf '%sWalking:%s\n' "$MAGENTA" "$RESET"
+  printf '%s\n' "- Forward duration: $(timing_value PLACE_FORWARD_DURATION)"
+  printf '%s\n' "- Left duration: $(timing_value PLACE_LEFT_DURATION)"
+  printf '%s\n\n' "- Extra E taps: $(on_off "$(timing_value PLACE_LIVE_E_ENABLED)")"
+
+  printf '%sImportant buttons:%s\n' "$MAGENTA" "$RESET"
+  printf '%s\n' "- Base button: $(point_value BASE_TELEPORT_BUTTON)"
+  printf '%s\n' "- Inventory button: $(point_value MENU_BUTTON)"
+  printf '%s\n' "- 2-minute potion: $(point_value POTION_2_MIN)"
+  printf '%s\n' "- 10x use button: $(point_value POTION_2_MIN_USE_10X_BUTTON)"
+  printf '%s\n\n' "- Pack click point: $(point_value PACK_CLICK_POINT)"
+
+  printf '%sProject:%s\n' "$MAGENTA" "$RESET"
+  printf '%s\n' "- Branch: ${branch:-<unknown>}"
+  printf '%s\n' "- Latest commit: $commit"
+  printf '%s\n' "- Changes: $(changed_summary)"
+}
+
+print_stop_screen() {
+  printf '%sStop / How to stop%s\n\n' "$BOLD$CYAN" "$RESET"
+  printf 'The macro runs in the foreground of this terminal.\n'
+  printf 'No background processes are started.\n\n'
+  printf '%sTo stop the macro:%s\n' "$BOLD" "$RESET"
+  printf '  Press %sCtrl+C%s while the macro is running.\n\n' "$BOLD$YELLOW" "$RESET"
+  printf 'The macro will stop after the current action completes.\n'
+  printf 'Your log is saved automatically.\n\n'
+  printf '%sNothing runs after you close this app.%s\n' "$GREY" "$RESET"
+}
+
+print_modules_screen() {
+  printf '%sMacro Modules%s\n\n' "$BOLD$CYAN" "$RESET"
+  printf '%s[READY        ]%s Pack Opener\n' "$GREEN" "$RESET"
+  printf '               Repeats one cycle at a time inside orchestrator\n'
+  printf '%s               Potion runner integrated%s\n\n' "$GREY" "$RESET"
+  buyer_module_label "$TOGGLE_MARKET_BUYER" "$MARKET_BUYER_POINTS_FILE" "Market Buyer"
+  printf '%s               Runs at every 10-min boundary%s\n\n' "$GREY" "$RESET"
+  buyer_module_label "$TOGGLE_FIGURINES_BUYER" "$FIGURINES_BUYER_POINTS_FILE" "Figurines Buyer"
+  printf '%s               Was: Shop Buyer — runs at every 10-min boundary%s\n\n' "$GREY" "$RESET"
+  printf '%s[OFF          ]%s Star Trials\n' "$YELLOW" "$RESET"
+  printf '%s               Imported / legacy / experimental — not enabled for live runs%s\n\n' "$GREY" "$RESET"
+  recovery_module_label "$TOGGLE_RECOVERY_RESTART" "Recovery Restart"
+  printf '%s               Optional Sober restart every N minutes to recover from long-session lag%s\n\n' "$GREY" "$RESET"
+  printf '%s[READY        ]%s Orchestrator — 10-Minute Combo Scheduler\n' "$GREEN" "$RESET"
+  printf '%s               Runs pack opener continuously;\n' "$GREY"
+  printf '               at :00/:10/:20/:30/:40/:50 runs Market Buyer then Figurines Buyer;%s\n' "$RESET"
+  printf '%s               recovery restart runs after buyers when interval is due%s\n' "$GREY" "$RESET"
+}
+
+print_project_status() {
+  local branch
+  local commit
+  local status
+
+  branch="$(git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || printf '<unknown>')"
+  commit="$(git -C "$PROJECT_ROOT" log -1 --oneline 2>/dev/null || printf '<unknown>')"
+  status="$(git -C "$PROJECT_ROOT" status --short 2>/dev/null || true)"
+
+  printf '%sPROJECT STATUS%s\n\n' "$BOLD$CYAN" "$RESET"
+  printf 'Branch:\n%s\n\n' "${branch:-<unknown>}"
+  printf 'Latest commit:\n%s\n\n' "$commit"
+  printf 'Changed files:\n'
+  if test -z "$status"; then
+    printf 'clean\n'
+  else
+    printf '%s\n' "$status"
+  fi
+}
+
+# ── Validation helpers ────────────────────────────────────────────────────────
+
+validate_cycles_1_to_3() {
+  local cycles="$1"
+  if ! [[ "$cycles" =~ ^[1-3]$ ]]; then
+    printf 'Please choose 1, 2, or 3 cycles.\n' >&2
+    return 2
+  fi
+}
+
+# ── Log helpers ───────────────────────────────────────────────────────────────
+
+new_log_file() {
+  local kind="$1"
+  mkdir -p "$LOG_DIR"
+  printf '%s/pack_opener_ui_%s_%s.txt' "$LOG_DIR" "$kind" "$(date +%Y%m%d-%H%M%S)"
+}
+
+now_ms() {
+  date +%s%3N
+}
+
+copy_log_if_possible() {
+  local log_file="$1"
+  if command -v wl-copy >/dev/null 2>&1; then
+    if wl-copy < "$log_file" 2>/dev/null; then
+      printf '\nThe log was copied to your clipboard.\n'
+    else
+      printf '\nClipboard copy skipped because wl-copy could not access the clipboard.\n'
+    fi
+  else
+    printf '\nClipboard copy skipped because wl-copy was not found.\n'
+  fi
+  return 0
+}
+
+finish_run_message() {
+  local status="$1"
+  local log_file="$2"
+
+  if test "$status" -eq 0; then
+    status_label="COMPLETE"
+    printf '\n%sRun complete.%s\n' "$GREEN" "$RESET"
+  else
+    status_label="FAILED"
+    printf '\n%sRun stopped or failed.%s\n' "$RED" "$RESET"
+  fi
+  printf 'Log saved to:\n%s\n' "$log_file"
+  copy_log_if_possible "$log_file"
+  if test "$status" -ne 0; then
+    printf '\nCheck the last lines of the log before running again.\n'
+  fi
+}
+
+# ── Dry run ───────────────────────────────────────────────────────────────────
+
+run_dry_cycles() {
+  local cycles="$1"
+  local log_file
+  local start_ms
+  local end_ms
+  local status
+
+  validate_cycles_1_to_3 "$cycles" || return $?
+  log_file="$(new_log_file dry_run)"
+  start_ms="$(now_ms)"
+  status_label="DRY RUN"
+
+  printf '%sTest without clicking%s\n' "$YELLOW" "$RESET"
+  printf 'This checks what the macro would do, but does not control the game.\n'
+  printf 'Cycles: %s\n\n' "$cycles"
+
+  "$MACROCTL" dry-run live-cycle --cycles "$cycles" > "$log_file" 2>&1
+  status=$?
+  end_ms="$(now_ms)"
+  printf 'elapsed_ms=%s\n' "$((end_ms - start_ms))" >> "$log_file"
+  finish_run_message "$status" "$log_file"
+  return "$status"
+}
+
+run_dry_cycles_with_trace() {
+  local cycles="$1"
+  local log_file
+  local start_ms
+  local end_ms
+  local status
+
+  validate_cycles_1_to_3 "$cycles" || return $?
+  log_file="$(new_log_file dry_run)"
+  start_ms="$(now_ms)"
+  status_label="DRY RUN"
+
+  printf '%sTest without clicking (timing trace)%s\n' "$YELLOW" "$RESET"
+  printf 'This checks timing data, but does not control the game.\n'
+  printf 'Cycles: %s\n\n' "$cycles"
+
+  MACRO_TRACE_TIMING=1 "$MACROCTL" dry-run live-cycle --cycles "$cycles" > "$log_file" 2>&1
+  status=$?
+  end_ms="$(now_ms)"
+  printf 'elapsed_ms=%s\n' "$((end_ms - start_ms))" >> "$log_file"
+  finish_run_message "$status" "$log_file"
+  return "$status"
+}
+
+# ── Live runs ─────────────────────────────────────────────────────────────────
+
+live_countdown() {
+  local label="$1"
+  if test "$use_animation" -eq 1; then
+    printf '%s IN 3\n' "$label"
+    sleep 1
+    printf '%s IN 2\n' "$label"
+    sleep 1
+    printf '%s IN 1\n' "$label"
+    sleep 1
+  fi
+  printf '%s\n' "$label"
+}
+
+confirm_live_run() {
+  local typed
+
+  printf '%sLIVE RUN WARNING%s\n\n' "$BOLD$YELLOW" "$RESET"
+  cat <<'EOF'
+This will control the game.
+Make sure:
+- Sober/Gamescope is open and visible.
+- The game is at the normal starting screen.
+- Inventory is closed.
+- You are ready for the macro to click and move.
+
+Type RUN LIVE to start.
+Press Enter without typing it to cancel.
+>
+EOF
+  read -r typed
+  test "$typed" = "RUN LIVE"
+}
+
+run_live_batch() {
+  local cycles="$1"
+  local log_file="$2"
+
+  MACRO_INPUT_MODE=live \
+    MACRO_LIVE_INPUT_ALLOWED=1 \
+    MACRO_LIVE_CYCLE_RUNNER_CONFIRM=YES \
+    "$MACROCTL" live live-cycle --cycles "$cycles" >> "$log_file" 2>&1
+}
+
+run_live_cycles() {
+  local cycles="$1"
+  local log_file
+  local start_ms
+  local end_ms
+  local status
+
+  validate_cycles_1_to_3 "$cycles" || return $?
+  if ! confirm_live_run; then
+    printf 'Cancelled.\n'
+    return 1
+  fi
+
+  log_file="$(new_log_file live)"
+  start_ms="$(now_ms)"
+  status_label="LIVE ARMED"
+  live_countdown RUNNING
+  status_label="RUNNING"
+
+  run_live_batch "$cycles" "$log_file"
+  status=$?
+  end_ms="$(now_ms)"
+  printf 'elapsed_ms=%s\n' "$((end_ms - start_ms))" >> "$log_file"
+  finish_run_message "$status" "$log_file"
+  return "$status"
+}
+
+confirm_run_until_stopped() {
+  local typed
+
+  printf '%sRUN UNTIL STOPPED WARNING%s\n\n' "$BOLD$YELLOW" "$RESET"
+  cat <<'EOF'
+This will keep controlling the game until you stop it.
+ACC repeats complete cycles until stopped, with no delay between cycles.
+
+What will run:
+  Pack Opener — continuous mode
+  One cycle: base → use potions → walk and place packs
+  Repeats until you stop it
+
+How to stop:
+  Press Ctrl+C while the macro is running.
+
+Make sure:
+- Sober/Gamescope is open and visible.
+- Inventory is closed.
+- You can stop the run with Ctrl+C.
+
+Type RUN UNTIL STOPPED to start.
+Press Enter without typing it to cancel.
+>
+EOF
+  read -r typed
+  test "$typed" = "RUN UNTIL STOPPED"
+}
+
+request_stop_until_stopped() {
+  ACC_STOP_REQUESTED=1
+}
+
+# One continuous live runner process that loops complete single cycles forever
+# (base -> potion -> placement) until Ctrl+C or a cycle fails. The cycle loop
+# lives in one process: no repeated macroctl launches and no between-cycle pause.
+run_live_until_stopped() {
+  local log_file="$1"
+
+  MACRO_INPUT_MODE=live \
+    MACRO_LIVE_INPUT_ALLOWED=1 \
+    MACRO_LIVE_CYCLE_RUNNER_CONFIRM=YES \
+    "$MACROCTL" live live-cycle --until-stopped >> "$log_file" 2>&1
+}
+
+run_until_stopped() {
+  local log_file
+  local start_ms
+  local end_ms
+  local status=0
+  local start_stamp
+  local old_int_trap
+
+  if ! confirm_run_until_stopped; then
+    printf 'Cancelled.\n'
+    return 1
+  fi
+
+  ACC_STOP_REQUESTED=0
+  old_int_trap="$(trap -p INT || true)"
+  trap 'request_stop_until_stopped' INT
+
+  log_file="$(new_log_file live_until_stopped)"
+  start_ms="$(now_ms)"
+  start_stamp="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  printf 'start_timestamp=%s\n' "$start_stamp" >> "$log_file"
+  printf 'mode=until_stopped\n' >> "$log_file"
+  printf 'between_cycle_pause=none\n' >> "$log_file"
+
+  status_label="LIVE ARMED"
+  live_countdown RUNNING
+  status_label="RUNNING"
+
+  show_running_side_profile
+
+  # Single live runner process loops cycles internally; ACC does not batch.
+  run_live_until_stopped "$log_file"
+  status=$?
+
+  if test "$ACC_STOP_REQUESTED" -ne 0; then
+    printf 'stopped_by_user=1\n' >> "$log_file"
+    status_label="STOPPED"
+    if test "$status" -eq 0; then
+      status=130
+    fi
+  fi
+
+  if test -n "$old_int_trap"; then
+    eval "$old_int_trap"
+  else
+    trap - INT
+  fi
+
+  end_ms="$(now_ms)"
+  printf 'elapsed_ms=%s\n' "$((end_ms - start_ms))" >> "$log_file"
+
+  if test "$status" -eq 130; then
+    status_label="STOPPED"
+    printf '\n%sStopped by user.%s\n' "$YELLOW" "$RESET"
+    printf 'Log saved to:\n%s\n' "$log_file"
+    copy_log_if_possible "$log_file"
+    return 0
+  else
+    finish_run_message "$status" "$log_file"
+    return "$status"
+  fi
+}
+
+# ── Logs screen ───────────────────────────────────────────────────────────────
+
+latest_logs() {
+  find "$LOG_DIR" -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn \
+    | head -n 10 \
+    | sed 's/^[^ ]* //'
+}
+
+print_latest_logs_list() {
+  local files
+  local i=1
+
+  printf '%sLATEST LOGS%s\n\n' "$BOLD$CYAN" "$RESET"
+  files="$(latest_logs)"
+  if test -z "$files"; then
+    printf 'No logs found in %s\n' "$LOG_DIR"
+    return
+  fi
+
+  while IFS= read -r file; do
+    printf '%s) %s\n' "$i" "$(basename "$file")"
+    i=$((i + 1))
+  done <<< "$files"
+}
+
+show_logs_screen() {
+  local files
+  local choice
+  local number
+  local selected
+
+  while true; do
+    files="$(latest_logs)"
+    clear_screen
+    print_latest_logs_list
+    printf '\nType a number to open a log.\n'
+    printf 'Type c and a number to copy it.\n'
+    printf 'Type q to go back.\n> '
+    read -r choice
+
+    case "$choice" in
+      q|Q)
+        return
+        ;;
+      c\ *)
+        number="${choice#c }"
+        if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+          printf 'Please use c and a number, for example c 1.\n'
+          pause_return
+          continue
+        fi
+        selected="$(printf '%s\n' "$files" | sed -n "${number}p")"
+        if test -z "$selected"; then
+          printf 'No log exists for that number.\n'
+          pause_return
+          continue
+        fi
+        if command -v wl-copy >/dev/null 2>&1; then
+          if wl-copy < "$selected" 2>/dev/null; then
+            printf 'Copied %s to clipboard.\n' "$(basename "$selected")"
+          else
+            printf 'Clipboard copy skipped because wl-copy could not access the clipboard.\n'
+          fi
+        else
+          printf 'Clipboard copy skipped because wl-copy was not found.\n'
+        fi
+        pause_return
+        ;;
+      *)
+        if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+          printf 'Please enter a number, c and a number, or q.\n'
+          pause_return
+          continue
+        fi
+        selected="$(printf '%s\n' "$files" | sed -n "${choice}p")"
+        if test -z "$selected"; then
+          printf 'No log exists for that number.\n'
+          pause_return
+          continue
+        fi
+        clear_screen
+        printf '%s\n\n' "$selected"
+        sed -n '1,220p' "$selected"
+        pause_return
+        ;;
+    esac
+  done
+}
+
+# ── Tuner launchers ───────────────────────────────────────────────────────────
+
+launch_potion_settings() {
+  printf 'Opening potion settings.\n\n'
+  printf 'Use this when:\n'
+  printf '%s\n' '- potion amount needs to change'
+  printf '%s\n' '- potion click speed needs to change'
+  printf '%s\n\n' '- inventory wait needs to change'
+  "$PROJECT_ROOT/bin/potion-tuner"
+}
+
+launch_button_calibration() {
+  printf 'Opening button calibration.\n\n'
+  printf 'Use this when:\n'
+  printf '%s\n' '- clicks land in the wrong place'
+  printf '%s\n' '- inventory opens but potion buttons are missed'
+  printf '%s\n\n' '- the game UI moved or scaled differently'
+  "$PROJECT_ROOT/bin/potion-point-calibrator"
+}
+
+launch_walking_path() {
+  printf 'Opening walking path adjustment.\n\n'
+  printf 'Use this when:\n'
+  printf '%s\n' '- packs place correctly but the walking path is off'
+  printf '%s\n\n' '- forward or left movement needs small timing changes'
+  "$PROJECT_ROOT/bin/walk-tuner"
+}
+
+# ── Interactive loops ─────────────────────────────────────────────────────────
+
+advanced_loop() {
+  local choice
+
+  while true; do
+    advanced_menu
+    read -r choice
+    case "$choice" in
+      1)
+        clear_screen
+        print_status_screen
+        pause_return
+        ;;
+      2)
+        clear_screen
+        run_dry_cycles 1
+        pause_return
+        ;;
+      3)
+        clear_screen
+        run_live_cycles 1
+        pause_return
+        ;;
+      4)
+        clear_screen
+        run_live_cycles 2
+        pause_return
+        ;;
+      5)
+        clear_screen
+        run_live_cycles 3
+        pause_return
+        ;;
+      6)
+        clear_screen
+        run_dry_cycles_with_trace 1
+        pause_return
+        ;;
+      7)
+        clear_screen
+        launch_potion_settings
+        pause_return
+        ;;
+      8)
+        clear_screen
+        launch_button_calibration
+        pause_return
+        ;;
+      9)
+        clear_screen
+        launch_walking_path
+        pause_return
+        ;;
+      10)
+        show_logs_screen
+        ;;
+      11)
+        clear_screen
+        print_project_status
+        pause_return
+        ;;
+      b|B)
+        return
+        ;;
+      *)
+        printf 'Please choose 1-11, or b to go back.\n'
+        pause_return
+        ;;
+    esac
+  done
+}
+
+# Check if a buyer's points file has all coordinates filled in.
+# Returns 0 (configured) or 1 (missing/unconfigured).
+buyer_points_configured() {
+  local points_file="$1"
+  if ! test -f "$points_file"; then
+    return 1
+  fi
+  local val
+  while IFS='=' read -r key val; do
+    case "$key" in
+      \#*|'') continue ;;
+    esac
+    if test -z "${val:-}"; then
+      return 1
+    fi
+  done < "$points_file"
+  return 0
+}
+
+# Returns a color-coded status label string for a buyer module.
+buyer_module_label() {
+  local toggle="$1"
+  local points_file="$2"
+  local name="$3"
+  if test "$toggle" != "1"; then
+    printf '%s[OFF          ]%s %s\n' "$YELLOW" "$RESET" "$name"
+  elif buyer_points_configured "$points_file"; then
+    printf '%s[READY        ]%s %s\n' "$GREEN" "$RESET" "$name"
+  else
+    printf '%s[NEEDS CALIB  ]%s %s\n' "$RED" "$RESET" "$name"
+  fi
+}
+
+module_toggle_label() {
+  local toggle="$1"
+  local name="$2"
+  if test "$toggle" = "1"; then
+    printf '%s[ON ]%s %s\n' "$GREEN" "$RESET" "$name"
+  else
+    printf '%s[OFF]%s %s\n' "$YELLOW" "$RESET" "$name"
+  fi
+}
+
+print_module_toggles_screen() {
+  clear_screen
+  small_logo
+  printf '%s╔══════════════════════════════════════════════════════════════╗%s\n' "$MAGENTA" "$RESET"
+  printf '%s║%s  %sMODULE TOGGLES%s                                             %s║%s\n' "$MAGENTA" "$RESET" "$BOLD$CYAN" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s╠══════════════════════════════════════════════════════════════╣%s\n' "$MAGENTA" "$RESET"
+  printf '%s║%s  ' "$MAGENTA" "$RESET"
+  module_toggle_label "$TOGGLE_PACK_OPENER" "Pack Opener        (press 1 to toggle)"
+  printf '%s║%s  ' "$MAGENTA" "$RESET"
+  module_toggle_label "$TOGGLE_MARKET_BUYER" "Market Buyer       (press 2 to toggle)"
+  printf '%s║%s  ' "$MAGENTA" "$RESET"
+  module_toggle_label "$TOGGLE_FIGURINES_BUYER" "Figurines Buyer    (press 3 to toggle)"
+  printf '%s║%s  %s[OFF]%s Star Trials        %s(imported/legacy — not available for live run)%s\n' \
+    "$MAGENTA" "$RESET" "$YELLOW" "$RESET" "$GREY" "$RESET"
+  printf '%s║%s  ' "$MAGENTA" "$RESET"
+  module_toggle_label "$TOGGLE_RECOVERY_RESTART" "Recovery Restart   (press 4 to toggle)"
+  printf '%s╠══════════════════════════════════════════════════════════════╣%s\n' "$MAGENTA" "$RESET"
+  printf '%s║%s  b) Back to main menu                                      %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s╚══════════════════════════════════════════════════════════════╝%s\n' "$MAGENTA" "$RESET"
+  printf '\nChoose: '
+}
+
+module_toggles_loop() {
+  local choice
+
+  while true; do
+    print_module_toggles_screen
+    read -r choice
+    case "$choice" in
+      1)
+        if test "$TOGGLE_PACK_OPENER" = "1"; then
+          TOGGLE_PACK_OPENER=0
+        else
+          TOGGLE_PACK_OPENER=1
+        fi
+        ;;
+      2)
+        if test "$TOGGLE_MARKET_BUYER" = "1"; then
+          TOGGLE_MARKET_BUYER=0
+        else
+          TOGGLE_MARKET_BUYER=1
+        fi
+        ;;
+      3)
+        if test "$TOGGLE_FIGURINES_BUYER" = "1"; then
+          TOGGLE_FIGURINES_BUYER=0
+        else
+          TOGGLE_FIGURINES_BUYER=1
+        fi
+        ;;
+      4)
+        if test "$TOGGLE_RECOVERY_RESTART" = "1"; then
+          TOGGLE_RECOVERY_RESTART=0
+        else
+          TOGGLE_RECOVERY_RESTART=1
+        fi
+        ;;
+      b|B)
+        return
+        ;;
+      *)
+        printf 'Please choose 1-4 to toggle, or b to go back.\n'
+        pause_return
+        ;;
+    esac
+  done
+}
+
+# Returns 0 if the typed string is a valid start confirmation; 1 otherwise.
+# Accepts: start, s, run, r, yes, y, START FULL MACRO, RUN FULL MACRO (case-insensitive).
+# Rejects empty input so accidental Enter does not start.
+full_macro_start_input_valid() {
+  local typed="$1"
+  # trim leading whitespace
+  typed="${typed#"${typed%%[![:space:]]*}"}"
+  # trim trailing whitespace
+  typed="${typed%"${typed##*[![:space:]]}"}"
+  if test -z "$typed"; then
+    return 1
+  fi
+  # normalize to lowercase
+  typed="$(printf '%s' "$typed" | tr '[:upper:]' '[:lower:]')"
+  case "$typed" in
+    s|start|r|run|y|yes|"start full macro"|"run full macro") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Kill the orchestrator background job and mark stop requested.
+_acc_stop_full_macro() {
+  ACC_STOP_REQUESTED=1
+  if test -n "$_acc_full_macro_orch_pid" && kill -0 "$_acc_full_macro_orch_pid" 2>/dev/null; then
+    kill "$_acc_full_macro_orch_pid" 2>/dev/null || true
+  fi
+}
+
+# Non-blocking key loop while the orchestrator runs in the background.
+# Reads p/P to request pause, c/C to continue. Updates the sticky controls line.
+_acc_full_macro_key_loop() {
+  local key ctrl_state last_ctrl_state
+  last_ctrl_state=""
+
+  while kill -0 "$_acc_full_macro_orch_pid" 2>/dev/null && test "$ACC_STOP_REQUESTED" -eq 0; do
+    key=""
+    IFS= read -rsn1 -t 0.2 key 2>/dev/null || true
+
+    if test "$ACC_STOP_REQUESTED" -ne 0; then
+      break
+    fi
+
+    case "${key:-}" in
+      p|P)
+        ctrl_state="$(orchestrator_control_get)"
+        if test "$ctrl_state" = "running"; then
+          orchestrator_control_request_pause
+        fi
+        ;;
+      c|C)
+        ctrl_state="$(orchestrator_control_get)"
+        if test "$ctrl_state" = "paused"; then
+          orchestrator_control_request_continue
+        fi
+        ;;
+    esac
+
+    ctrl_state="$(orchestrator_control_get)"
+    if test "$ctrl_state" != "$last_ctrl_state"; then
+      last_ctrl_state="$ctrl_state"
+      case "$ctrl_state" in
+        running)
+          printf '\r\033[2K%sControls: p = pause after current loop | Ctrl+C = stop%s' "$DIM" "$RESET"
+          ;;
+        pause_requested)
+          printf '\r\033[2K%sControls: pause requested — will pause after current loop | Ctrl+C = stop%s' "$YELLOW" "$RESET"
+          ;;
+        paused)
+          printf '\r\033[2K%sControls: c = continue | Ctrl+C = stop%s' "$CYAN" "$RESET"
+          ;;
+        continue_requested)
+          printf '\r\033[2K%sControls: resuming... | Ctrl+C = stop%s' "$DIM" "$RESET"
+          ;;
+      esac
+    fi
+  done
+  printf '\n'
+}
+
+confirm_full_macro_run() {
+  local typed
+
+  printf '%sFULL MACRO WARNING%s\n\n' "$BOLD$YELLOW" "$RESET"
+  printf 'This will run the full orchestrator — controlling the game until stopped.\n\n'
+  printf 'Enabled modules:\n'
+  if test "$TOGGLE_PACK_OPENER" = "1"; then
+    printf '  %s+ Pack Opener%s  (continuous, one cycle at a time)\n' "$GREEN" "$RESET"
+  fi
+  if test "$TOGGLE_MARKET_BUYER" = "1"; then
+    printf '  %s+ Market Buyer%s  (at 10-min boundaries)\n' "$GREEN" "$RESET"
+  fi
+  if test "$TOGGLE_FIGURINES_BUYER" = "1"; then
+    printf '  %s+ Figurines Buyer%s  (at 10-min boundaries)\n' "$GREEN" "$RESET"
+  fi
+  printf '\nBuyer schedule: every 10 minutes (:00/:10/:20/:30/:40/:50)\n'
+  printf 'Buyer order:    Market Buyer → Figurines Buyer\n\n'
+  if test "$TOGGLE_MARKET_BUYER" = "1" && ! buyer_points_configured "$MARKET_BUYER_POINTS_FILE"; then
+    printf '%sWARNING: Market Buyer is ON but points are not calibrated.%s\n' "$BOLD$RED" "$RESET"
+    printf '%s         The macro will refuse to start. Disable it or calibrate first.%s\n\n' "$RED" "$RESET"
+  fi
+  if test "$TOGGLE_FIGURINES_BUYER" = "1" && ! buyer_points_configured "$FIGURINES_BUYER_POINTS_FILE"; then
+    printf '%sWARNING: Figurines Buyer is ON but points are not calibrated.%s\n' "$BOLD$RED" "$RESET"
+    printf '%s         The macro will refuse to start. Disable it or calibrate first.%s\n\n' "$RED" "$RESET"
+  fi
+  if test "$TOGGLE_RECOVERY_RESTART" = "1"; then
+    local rec_interval rec_wait
+    rec_interval="$(recovery_config_get RECOVERY_INTERVAL_MINUTES)"
+    rec_wait="$(recovery_config_get RECOVERY_POST_LAUNCH_WAIT)"
+    printf '  %s+ Recovery Restart%s  (every %s minutes)\n' "$GREEN" "$RESET" "${rec_interval:-120}"
+    printf '    Will: open private server link via xdg-open\n'
+    printf '          wait %s for game to load\n' "${rec_wait:-10m}"
+    printf '          close first-login popup\n'
+    printf '          press 1 to select pack\n'
+    printf '          open inventory, click Items tab, close inventory\n'
+    printf '          spam BASE_TELEPORT_BUTTON ×10 @ 15ms, then resume\n\n'
+    if ! recovery_url_configured || ! recovery_required_points_configured; then
+      printf '%sWARNING: Recovery Restart is ON but required config is missing.%s\n' "$BOLD$RED" "$RESET"
+      printf '%s         The macro will refuse to start. Configure recovery or disable it.%s\n\n' "$RED" "$RESET"
+    fi
+  fi
+  printf 'How to stop:\n'
+  printf '  Press %sCtrl+C%s while the macro is running.\n\n' "$BOLD$YELLOW" "$RESET"
+  printf 'Make sure:\n'
+  printf '%s\n' '- Sober/Gamescope is open and visible.'
+  printf '%s\n' '- The game is at the normal starting screen.'
+  printf '%s\n\n' '- Inventory is closed.'
+  printf 'Type %sstart%s or %ss%s to start.\n' "$BOLD" "$RESET" "$BOLD" "$RESET"
+  printf 'Press Enter without typing to cancel.\n> '
+  read -r typed
+  if test -z "$typed"; then
+    return 1
+  fi
+  full_macro_start_input_valid "$typed"
+}
+
+run_live_full_macro() {
+  local log_file="$1"
+
+  MACRO_INPUT_MODE=live \
+    MACRO_LIVE_INPUT_ALLOWED=1 \
+    MACRO_LIVE_CYCLE_RUNNER_CONFIRM=YES \
+    ORCHESTRATOR_PACK_ENABLED="$TOGGLE_PACK_OPENER" \
+    ORCHESTRATOR_MARKET_BUYER_ENABLED="$TOGGLE_MARKET_BUYER" \
+    ORCHESTRATOR_FIGURINES_BUYER_ENABLED="$TOGGLE_FIGURINES_BUYER" \
+    ORCHESTRATOR_RECOVERY_ENABLED="$TOGGLE_RECOVERY_RESTART" \
+    "$MACROCTL" live orchestrator >> "$log_file" 2>&1
+}
+
+run_full_macro_until_stopped() {
+  local log_file
+  local start_ms
+  local end_ms
+  local status=0
+  local start_stamp
+  local old_int_trap
+
+  if ! confirm_full_macro_run; then
+    printf 'Cancelled.\n'
+    return 1
+  fi
+
+  # Clear stale pause state before starting
+  orchestrator_control_init
+
+  _acc_full_macro_orch_pid=""
+  ACC_STOP_REQUESTED=0
+  old_int_trap="$(trap -p INT || true)"
+  trap '_acc_stop_full_macro' INT
+
+  log_file="$(new_log_file full_macro)"
+  start_ms="$(now_ms)"
+  start_stamp="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  printf 'start_timestamp=%s\n' "$start_stamp" >> "$log_file"
+  printf 'mode=full_macro\n' >> "$log_file"
+  printf 'pack_opener=%s\n' "$TOGGLE_PACK_OPENER" >> "$log_file"
+  printf 'market_buyer=%s\n' "$TOGGLE_MARKET_BUYER" >> "$log_file"
+  printf 'figurines_buyer=%s\n' "$TOGGLE_FIGURINES_BUYER" >> "$log_file"
+
+  status_label="LIVE ARMED"
+  live_countdown RUNNING
+  status_label="RUNNING"
+
+  show_running_side_profile
+
+  if test "$interactive" -eq 1; then
+    printf '%sControls: p = pause after current loop | Ctrl+C = stop%s' "$DIM" "$RESET"
+  fi
+
+  # Background the orchestrator so the UI can read terminal keys for pause/resume
+  run_live_full_macro "$log_file" &
+  _acc_full_macro_orch_pid=$!
+
+  if test "$interactive" -eq 1; then
+    _acc_full_macro_key_loop
+  fi
+
+  wait "$_acc_full_macro_orch_pid" 2>/dev/null || status=$?
+  _acc_full_macro_orch_pid=""
+
+  if test "$ACC_STOP_REQUESTED" -ne 0; then
+    printf 'stopped_by_user=1\n' >> "$log_file"
+    status_label="STOPPED"
+    status=130
+  fi
+
+  if test -n "$old_int_trap"; then
+    eval "$old_int_trap"
+  else
+    trap - INT
+  fi
+
+  end_ms="$(now_ms)"
+  printf 'elapsed_ms=%s\n' "$((end_ms - start_ms))" >> "$log_file"
+
+  if test "$status" -eq 130; then
+    status_label="STOPPED"
+    printf '\n%sStopped by user.%s\n' "$YELLOW" "$RESET"
+    printf 'Log saved to:\n%s\n' "$log_file"
+    copy_log_if_possible "$log_file"
+    return 0
+  else
+    finish_run_message "$status" "$log_file"
+    return "$status"
+  fi
+}
+
+interactive_loop() {
+  local choice
+
+  startup_pulse
+  while true; do
+    main_menu
+    read -r choice
+    case "$choice" in
+      1)
+        clear_screen
+        run_full_macro_until_stopped
+        pause_return
+        ;;
+      2)
+        module_toggles_loop
+        ;;
+      3)
+        clear_screen
+        print_status_screen
+        pause_return
+        ;;
+      4)
+        clear_screen
+        print_modules_screen
+        pause_return
+        ;;
+      5)
+        advanced_loop
+        ;;
+      q|Q)
+        printf 'Stopped.\n'
+        return 0
+        ;;
+      *)
+        printf 'Please choose 1-5, or q.\n'
+        pause_return
+        ;;
+    esac
+  done
+}
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  "")
+    if test "$interactive" -ne 1; then
+      usage
+      exit 2
+    fi
+    interactive_loop
+    ;;
+  --help|-h)
+    usage
+    ;;
+  --status)
+    print_status_screen
+    ;;
+  --dry-run-cycles)
+    shift
+    if test "$#" -ne 1; then
+      printf 'Please provide a cycle count from 1 to 3.\n' >&2
+      exit 2
+    fi
+    run_dry_cycles "$1"
+    ;;
+  --print-latest-logs)
+    print_latest_logs_list
+    ;;
+  --art)
+    print_art
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

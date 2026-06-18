@@ -1,0 +1,42 @@
+# Private folders — never commit these
+runtime_config/
+runtime_config/**/*
+00_handoff/
+00_handoff/**/*
+01_docs/
+01_docs/**/*
+02_contracts/
+02_contracts/**/*
+03_codex_reports/
+03_codex_reports/**/*
+04_manual_tests/
+04_manual_tests/**/*
+05_debug_snapshots/
+05_debug_snapshots/**/*
+
+# Legacy zip that was already excluded
+pack_opener_fresh_start_handoff.zip
+
+# Generated / temp files
+*.log
+*.trace
+*.tmp
+*.bak
+*.backup
+*.backup.*
+*.local
+*.secret
+*.env
+.env
+.env.*
+*.swp
+*.swo
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.cache/
+.DS_Store
+
+# Explicit recovery private config (belt-and-suspenders)
+runtime_config/recovery/defaults.conf
+runtime_config/recovery/points.conf

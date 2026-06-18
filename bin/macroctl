@@ -1,0 +1,506 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'Usage: %s status\n' "$0" >&2
+  printf '       %s dry-run input-primitives\n' "$0" >&2
+  printf '       %s dry-run fast-click-burst\n' "$0" >&2
+  printf '       %s dry-run points-config\n' "$0" >&2
+  printf '       %s dry-run potion-plan\n' "$0" >&2
+  printf '       %s dry-run potion-plan-negative\n' "$0" >&2
+  printf '       %s dry-run place-runner\n' "$0" >&2
+  printf '       %s dry-run place-runner-negative\n' "$0" >&2
+  printf '       %s dry-run place-runner-live-gate\n' "$0" >&2
+  printf '       %s dry-run place-e-runner\n' "$0" >&2
+  printf '       %s dry-run place-e-runner-negative\n' "$0" >&2
+  printf '       %s dry-run place-e-runner-live-gate\n' "$0" >&2
+  printf '       %s dry-run pack-opener [--cycles N]\n' "$0" >&2
+  printf '       %s dry-run pack-opener-negative\n' "$0" >&2
+  printf '       %s dry-run potion-runner\n' "$0" >&2
+  printf '       %s dry-run potion-runner-negative\n' "$0" >&2
+  printf '       %s dry-run potion-runner-live-gate\n' "$0" >&2
+  printf '       %s dry-run live-deadline-scheduler\n' "$0" >&2
+  printf '       %s dry-run place-point-calibration\n' "$0" >&2
+  printf '       %s dry-run live-cycle [--cycles N | --until-stopped --dry-run-limit N] [--with-potions] [--no-potions] [--return-to-base-after-cycle]\n' "$0" >&2
+  printf '       %s dry-run live-cycle-negative\n' "$0" >&2
+  printf '       %s dry-run orchestrator [--cycles N]\n' "$0" >&2
+  printf '       %s dry-run orchestrator-pause\n' "$0" >&2
+  printf '       %s dry-run recovery\n' "$0" >&2
+  printf '       %s dry-run pack-opener-ui-confirm\n' "$0" >&2
+  printf '       %s dry-run market-buyer\n' "$0" >&2
+  printf '       %s dry-run figurines-buyer\n' "$0" >&2
+  printf '       %s dry-run star-trials\n' "$0" >&2
+  printf '       %s live place-runner\n' "$0" >&2
+  printf '       %s live place-e-runner\n' "$0" >&2
+  printf '       %s live potion-runner\n' "$0" >&2
+  printf '       %s live live-cycle [--cycles N | --until-stopped] [--with-potions] [--no-potions] [--return-to-base-after-cycle]\n' "$0" >&2
+  printf '       %s live orchestrator\n' "$0" >&2
+  printf '       %s print-points pack-opener\n' "$0" >&2
+  printf '       %s print-potion-plan pack-opener\n' "$0" >&2
+  printf '       %s validate-config pack-opener\n' "$0" >&2
+  printf '       %s validate-config orchestrator\n' "$0" >&2
+  printf '       %s validate-config recovery\n' "$0" >&2
+  printf '       %s validate-potion-plan pack-opener\n' "$0" >&2
+  printf '       %s tune-walk [walk-tuner args]\n' "$0" >&2
+  printf '       %s tune-potions [potion-tuner args]\n' "$0" >&2
+  printf '       %s calibrate-potion-points [potion-point-calibrator args]\n' "$0" >&2
+  printf '       %s ui [acc-ui args]\n' "$0" >&2
+}
+
+script_path="${BASH_SOURCE[0]}"
+script_dir="${script_path%/*}"
+
+if test "$script_dir" = "$script_path"; then
+  script_dir="."
+fi
+
+case "$script_dir" in
+  /*)
+    project_root="${script_dir%/bin}"
+    ;;
+  .)
+    project_root="$(pwd)"
+    ;;
+  ./*)
+    project_root="$(pwd)/${script_dir#./}"
+    project_root="${project_root%/bin}"
+    ;;
+  *)
+    project_root="$(pwd)/$script_dir"
+    project_root="${project_root%/bin}"
+    ;;
+esac
+
+command_name="${1:-}"
+
+case "$command_name" in
+  dry-run)
+    shift
+    subcommand_name="${1:-}"
+    case "$subcommand_name" in
+      input-primitives)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/input_primitives_dry_run.sh"
+        ;;
+      fast-click-burst)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/fast_click_burst_dry_run.sh"
+        ;;
+      points-config)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/points_config_dry_run.sh"
+        ;;
+      potion-plan)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/potion_plan_dry_run.sh"
+        ;;
+      potion-plan-negative)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/potion_plan_negative_dry_run.sh"
+        ;;
+      place-runner)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/place_runner_dry_run.sh"
+        ;;
+      place-runner-negative)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/place_runner_negative_dry_run.sh"
+        ;;
+      place-runner-live-gate)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/place_runner_live_gate_dry_run.sh"
+        ;;
+      place-e-runner)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/place_e_runner_dry_run.sh"
+        ;;
+      place-e-runner-negative)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/place_e_runner_negative_dry_run.sh"
+        ;;
+      place-e-runner-live-gate)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/place_e_runner_live_gate_dry_run.sh"
+        ;;
+      pack-opener)
+        shift
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" "$project_root/src/modules/pack_opener_runner.sh" --dry-run "$@"
+        ;;
+      pack-opener-negative)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/pack_opener_runner_negative_dry_run.sh"
+        ;;
+      potion-runner)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/potion_runner_dry_run.sh"
+        ;;
+      potion-runner-negative)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/potion_runner_negative_dry_run.sh"
+        ;;
+      potion-runner-live-gate)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/potion_runner_live_gate_dry_run.sh"
+        ;;
+      live-deadline-scheduler)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/live_deadline_scheduler_dry_run.sh"
+        ;;
+      place-point-calibration)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/place_point_calibration_dry_run.sh"
+        ;;
+      live-cycle)
+        shift
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" "$project_root/src/modules/live_cycle_runner.sh" --dry-run "$@"
+        ;;
+      live-cycle-negative)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/live_cycle_runner_negative_dry_run.sh"
+        ;;
+      orchestrator)
+        shift
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" "$project_root/src/modules/orchestrator.sh" --dry-run "$@"
+        ;;
+      orchestrator-pause)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/orchestrator_pause_dry_run.sh"
+        ;;
+      recovery)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/recovery_dry_run.sh"
+        ;;
+      pack-opener-ui-confirm)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/pack_opener_ui_confirmation_dry_run.sh"
+        ;;
+      market-buyer)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/market_buyer_dry_run.sh"
+        ;;
+      figurines-buyer)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/figurines_buyer_dry_run.sh"
+        ;;
+      star-trials)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/star_trials_dry_run.sh"
+        ;;
+      *)
+        usage
+        exit 2
+        ;;
+    esac
+    ;;
+  live)
+    shift
+    subcommand_name="${1:-}"
+    case "$subcommand_name" in
+      place-runner)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/src/modules/place_runner.sh" --live
+        ;;
+      place-e-runner)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/src/modules/place_e_runner.sh" --live
+        ;;
+      potion-runner)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/src/modules/potion_runner.sh" --live
+        ;;
+      live-cycle)
+        shift
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/src/modules/live_cycle_runner.sh" --live "$@"
+        ;;
+      orchestrator)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/src/modules/orchestrator.sh" --live
+        ;;
+      *)
+        usage
+        exit 2
+        ;;
+    esac
+    ;;
+  print-points)
+    shift
+    module_name="${1:-}"
+    shift || true
+    if test "$module_name" != "pack-opener" || test "$#" -ne 0; then
+      usage
+      exit 2
+    fi
+    # shellcheck source=../src/lib/config.sh
+    . "$project_root/src/lib/config.sh"
+    # shellcheck source=../src/lib/points.sh
+    . "$project_root/src/lib/points.sh"
+    config_bootstrap_pack_opener_from_templates
+    config_print_pack_opener_paths
+    points_load "$(config_pack_opener_dir)/points.conf"
+    points_print_all
+    ;;
+  print-potion-plan)
+    shift
+    module_name="${1:-}"
+    shift || true
+    if test "$module_name" != "pack-opener" || test "$#" -ne 0; then
+      usage
+      exit 2
+    fi
+    # shellcheck source=../src/lib/config.sh
+    . "$project_root/src/lib/config.sh"
+    # shellcheck source=../src/lib/points.sh
+    . "$project_root/src/lib/points.sh"
+    # shellcheck source=../src/lib/potion_plan.sh
+    . "$project_root/src/lib/potion_plan.sh"
+    config_bootstrap_pack_opener_from_templates
+    config_print_pack_opener_paths
+    points_load "$(config_pack_opener_dir)/points.conf"
+    potion_plan_load "$(config_pack_opener_potion_plan_file)"
+    potion_plan_print
+    potion_plan_print_click_plan
+    ;;
+  validate-config)
+    shift
+    module_name="${1:-}"
+    shift || true
+    case "$module_name" in
+      pack-opener)
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        # shellcheck source=../src/lib/config.sh
+        . "$project_root/src/lib/config.sh"
+        # shellcheck source=../src/lib/points.sh
+        . "$project_root/src/lib/points.sh"
+        config_bootstrap_pack_opener_from_templates
+        points_load "$(config_pack_opener_dir)/points.conf"
+        points_validate_required "$project_root/config_templates/pack_opener/points.required"
+        timing_load "$(config_pack_opener_dir)/timing.conf"
+        timing_validate_required "$project_root/config_templates/pack_opener/timing.required"
+        ;;
+      orchestrator)
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        # shellcheck source=../src/lib/config.sh
+        . "$project_root/src/lib/config.sh"
+        MACRO_PROJECT_ROOT="$project_root"
+        orch_dir="$(config_orchestrator_dir)"
+        orch_template_dir="$(config_orchestrator_template_dir)"
+        printf 'Orchestrator config dir: %s\n' "$orch_dir"
+        printf 'Orchestrator template dir: %s\n' "$orch_template_dir"
+        if ! test -f "$orch_template_dir/defaults.conf"; then
+          printf 'ERROR: orchestrator template defaults not found: %s/defaults.conf\n' "$orch_template_dir" >&2
+          exit 2
+        fi
+        printf 'Template defaults: OK\n'
+        if test -f "$orch_dir/defaults.conf"; then
+          printf 'Runtime defaults: found\n'
+        else
+          printf 'Runtime defaults: not yet bootstrapped (will be created on first run)\n'
+        fi
+        printf 'validate-config orchestrator: OK\n'
+        ;;
+      recovery)
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        # shellcheck source=../src/lib/config.sh
+        . "$project_root/src/lib/config.sh"
+        MACRO_PROJECT_ROOT="$project_root"
+        rec_dir="$(config_recovery_dir)"
+        rec_template_dir="$(config_recovery_template_dir)"
+        printf 'Recovery config dir: %s\n' "$rec_dir"
+        printf 'Recovery template dir: %s\n' "$rec_template_dir"
+        for f in defaults.conf points.conf; do
+          if ! test -f "$rec_template_dir/$f"; then
+            printf 'ERROR: recovery template not found: %s/%s\n' "$rec_template_dir" "$f" >&2
+            exit 2
+          fi
+          printf 'Template %s: OK\n' "$f"
+        done
+        if test -f "$rec_dir/defaults.conf"; then
+          rec_enabled_val="$(grep -E '^RECOVERY_ENABLED=' "$rec_dir/defaults.conf" | tail -n1 | cut -d= -f2 || true)"
+          printf 'Runtime defaults: found (RECOVERY_ENABLED=%s)\n' "${rec_enabled_val:-0}"
+        else
+          printf 'Runtime defaults: not yet bootstrapped (will be created on first use)\n'
+        fi
+        if test -f "$rec_dir/points.conf"; then
+          printf 'Runtime points: found\n'
+        else
+          printf 'Runtime points: not yet bootstrapped (will be created on first use)\n'
+        fi
+        printf 'validate-config recovery: OK\n'
+        ;;
+      *)
+        usage
+        exit 2
+        ;;
+    esac
+    ;;
+  validate-potion-plan)
+    shift
+    module_name="${1:-}"
+    shift || true
+    if test "$module_name" != "pack-opener" || test "$#" -ne 0; then
+      usage
+      exit 2
+    fi
+    # shellcheck source=../src/lib/config.sh
+    . "$project_root/src/lib/config.sh"
+    # shellcheck source=../src/lib/points.sh
+    . "$project_root/src/lib/points.sh"
+    # shellcheck source=../src/lib/potion_plan.sh
+    . "$project_root/src/lib/potion_plan.sh"
+    config_bootstrap_pack_opener_from_templates
+    points_load "$(config_pack_opener_dir)/points.conf"
+    potion_plan_load "$(config_pack_opener_potion_plan_file)"
+    potion_plan_validate
+    potion_plan_preflight_inventory
+    potion_plan_print_click_plan >/dev/null
+    ;;
+  status)
+    shift
+    if test "$#" -ne 0; then
+      usage
+      exit 2
+    fi
+    MACRO_PROJECT_ROOT="$project_root" "$project_root/src/host/status.sh"
+    ;;
+  ui)
+    shift
+    exec "$project_root/bin/pack-opener-ui" "$@"
+    ;;
+  tune-walk)
+    shift
+    exec "$project_root/bin/walk-tuner" "$@"
+    ;;
+  tune-potions)
+    shift
+    exec "$project_root/bin/potion-tuner" "$@"
+    ;;
+  calibrate-potion-points)
+    shift
+    exec "$project_root/bin/potion-point-calibrator" "$@"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

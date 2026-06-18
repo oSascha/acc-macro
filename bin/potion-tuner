@@ -1,0 +1,595 @@
+#!/usr/bin/env bash
+#
+# potion-tuner: a tiny terminal UI for tuning Pack Opener potion timing.
+#
+# Scope guards:
+#   * edits only the runtime potion plan and potion wait timing keys
+#   * never edits placement keys, walking durations, PACK_CLICK_POINT, or flow
+#   * never calls xdotool/ydotool directly
+#   * live input is only launched through: ./bin/macroctl live potion-runner
+#   * live input requires typed RUN confirmation and is never run on startup
+
+set -uo pipefail
+
+potion_tuner_script="${BASH_SOURCE[0]}"
+potion_tuner_bin_dir="$(cd "${potion_tuner_script%/*}" && pwd -P)"
+PROJECT_ROOT="${potion_tuner_bin_dir%/bin}"
+
+RUNTIME_DIR="$PROJECT_ROOT/runtime_config/pack_opener"
+RUNTIME_TIMING="$RUNTIME_DIR/timing.conf"
+RUNTIME_PLAN="$RUNTIME_DIR/potion_plan.conf"
+RUNTIME_POINTS="$RUNTIME_DIR/points.conf"
+TEMPLATE_TIMING="$PROJECT_ROOT/config_templates/pack_opener/timing.conf"
+TEMPLATE_PLAN="$PROJECT_ROOT/config_templates/pack_opener/potion_plan.conf"
+LOG_DIR="$PROJECT_ROOT/05_debug_snapshots/logs"
+PATCH_DIR="$PROJECT_ROOT/05_debug_snapshots/patches"
+CSV_FILE="$PROJECT_ROOT/04_manual_tests/potion_tuning_results.csv"
+MACROCTL="$PROJECT_ROOT/bin/macroctl"
+
+# Reuse the project parser so displayed durations match the real runner.
+# shellcheck source=../src/lib/timing.sh
+. "$PROJECT_ROOT/src/lib/timing.sh"
+
+ensure_runtime() {
+  mkdir -p "$RUNTIME_DIR"
+  if ! test -f "$RUNTIME_TIMING"; then
+    cp "$TEMPLATE_TIMING" "$RUNTIME_TIMING"
+    printf 'Created runtime timing config from template: %s\n' "$RUNTIME_TIMING"
+  fi
+  if ! test -f "$RUNTIME_PLAN"; then
+    cp "$TEMPLATE_PLAN" "$RUNTIME_PLAN"
+    printf 'Created runtime potion plan config from template: %s\n' "$RUNTIME_PLAN"
+  fi
+}
+
+config_get() {
+  local file="$1" key="$2" line
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n1)" || true
+  printf '%s' "${line#*=}"
+}
+
+config_set() {
+  local file="$1" key="$2" value="$3"
+  if grep -qE "^${key}=" "$file"; then
+    sed -i -E "s|^${key}=.*|${key}=${value}|" "$file"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+plan_get() {
+  config_get "$RUNTIME_PLAN" "$1"
+}
+
+plan_set() {
+  config_set "$RUNTIME_PLAN" "$1" "$2"
+}
+
+timing_get_raw() {
+  config_get "$RUNTIME_TIMING" "$1"
+}
+
+timing_set_raw() {
+  config_set "$RUNTIME_TIMING" "$1" "$2"
+}
+
+ms_to_duration() {
+  local ms="$1" seconds rem
+  seconds=$((ms / 1000))
+  rem=$((ms % 1000))
+
+  if test "$seconds" -eq 0; then
+    printf '%sms' "$rem"
+  elif test "$rem" -eq 0; then
+    printf '%ss' "$seconds"
+  else
+    printf '%ss%sms' "$seconds" "$rem"
+  fi
+}
+
+to_ms() {
+  local value="$1"
+  if test -z "$value"; then
+    printf '?'
+    return
+  fi
+  parse_duration_ms "$value" 2>/dev/null || printf '?'
+}
+
+decompose_amount() {
+  local amount="$1"
+  if [[ "$amount" =~ ^[0-9]+$ ]]; then
+    printf '%s %s\n' "$((amount / 10))" "$((amount % 10))"
+  else
+    printf '? ?\n'
+  fi
+}
+
+point_pair_is_set() {
+  local point="$1" x y
+  x="$(config_get "$RUNTIME_POINTS" "${point}_X")"
+  y="$(config_get "$RUNTIME_POINTS" "${point}_Y")"
+  test -n "$x" && test -n "$y"
+}
+
+print_current() {
+  local plan_enabled tier_enabled amount decomposed ten_x_clicks single_clicks
+  local nav_interval click_interval open_wait select_wait tier_wait sequence_wait
+  local close_inventory
+
+  plan_enabled="$(plan_get POTION_PLAN_ENABLED)"
+  tier_enabled="$(plan_get POTION_2_MIN_ENABLED)"
+  amount="$(plan_get POTION_2_MIN_USE_AMOUNT)"
+  decomposed="$(decompose_amount "$amount")"
+  ten_x_clicks="${decomposed%% *}"
+  single_clicks="${decomposed#* }"
+  nav_interval="$(plan_get POTION_NAV_CLICK_INTERVAL)"
+  click_interval="$(plan_get POTION_CLICK_INTERVAL)"
+  open_wait="$(timing_get_raw POST_INVENTORY_OPEN_WAIT)"
+  select_wait="$(timing_get_raw POST_POTION_SELECT_WAIT)"
+  tier_wait="$(timing_get_raw POST_POTION_TIER_WAIT)"
+  sequence_wait="$(timing_get_raw POST_POTION_SEQUENCE_WAIT)"
+  close_inventory="$(plan_get CLOSE_INVENTORY)"
+
+  printf 'SOBER POTION TUNER\n\n'
+  printf 'Current runtime settings:\n\n'
+  printf '* Potion plan enabled: %s\n' "${plan_enabled:-<unset>}"
+  printf '* Hatch 1 / 2-minute potion enabled: %s\n' "${tier_enabled:-<unset>}"
+  printf '* Hatch 1 / 2-minute potion amount: %s\n' "${amount:-<unset>}"
+  printf '* This means: %s x 10x clicks + %s single clicks\n' "$ten_x_clicks" "$single_clicks"
+  printf '* Potion nav click interval: %s\n' "${nav_interval:-<unset>}"
+  printf '* Potion use click interval: %s\n' "${click_interval:-<unset>}"
+  printf '* Wait after inventory/menu open: %s\n' "${open_wait:-<unset>}"
+  printf '* Wait after potion tier select: %s\n' "${select_wait:-<unset>}"
+  printf '* Wait after potion tier complete: %s\n' "${tier_wait:-<unset>}"
+  printf '* Wait after full potion sequence: %s\n' "${sequence_wait:-<unset>}"
+  printf '* Close inventory after use: %s\n' "${close_inventory:-<unset>}"
+  printf '* Test command: potion-runner only, no placement\n'
+}
+
+read_duration_ms() {
+  local label="$1" input confirm
+  REPLY_MS=""
+  read -r -p "$label (integer ms 0-5000, blank to cancel): " input
+  if test -z "$input"; then
+    printf 'Cancelled.\n'
+    return 1
+  fi
+  if ! [[ "$input" =~ ^[0-9]+$ ]]; then
+    printf 'Invalid: must be an integer number of milliseconds.\n'
+    return 1
+  fi
+  if test "$input" -gt 5000; then
+    printf 'Invalid: must be at most 5000ms.\n'
+    return 1
+  fi
+  if test "$input" -gt 1000; then
+    read -r -p "Value is ${input}ms. Type YES to confirm: " confirm
+    if test "$confirm" != "YES"; then
+      printf 'Cancelled.\n'
+      return 1
+    fi
+  fi
+  REPLY_MS="$input"
+  return 0
+}
+
+read_bool_toggle() {
+  local file="$1" key="$2" label="$3" cur next
+  cur="$(config_get "$file" "$key")"
+  if test "$cur" = "1"; then
+    next=0
+  else
+    next=1
+  fi
+  config_set "$file" "$key" "$next"
+  printf '%s set to %s (%s=%s).\n' "$label" "$next" "$key" "$next"
+}
+
+warn_if_single_amount_without_point() {
+  local amount="$1" single_clicks
+  if ! [[ "$amount" =~ ^[0-9]+$ ]]; then
+    return
+  fi
+  single_clicks=$((amount % 10))
+  if test "$single_clicks" -gt 0 && ! point_pair_is_set POTION_2_MIN_USE_SINGLE_BUTTON; then
+    printf 'WARNING: amount %s needs %s single clicks, but POTION_2_MIN_USE_SINGLE_BUTTON is unset/blank in points.conf.\n' "$amount" "$single_clicks"
+    printf 'Single-click use may fail without a configured single button.\n'
+  fi
+}
+
+action_set_amount() {
+  local input decomposed ten_x_clicks single_clicks confirm
+  read -r -p 'New Hatch 1 / 2-minute potion amount (integer, blank to cancel): ' input
+  if test -z "$input"; then
+    printf 'Cancelled.\n'
+    return
+  fi
+  if ! [[ "$input" =~ ^[0-9]+$ ]]; then
+    printf 'Invalid: amount must be a non-negative integer.\n'
+    return
+  fi
+
+  warn_if_single_amount_without_point "$input"
+  if test "$((input % 10))" -gt 0; then
+    read -r -p 'Apply this non-multiple-of-10 amount anyway? Type YES to confirm: ' confirm
+    if test "$confirm" != "YES"; then
+      printf 'Cancelled.\n'
+      return
+    fi
+  fi
+
+  plan_set POTION_2_MIN_USE_AMOUNT "$input"
+  decomposed="$(decompose_amount "$input")"
+  ten_x_clicks="${decomposed%% *}"
+  single_clicks="${decomposed#* }"
+  printf 'Hatch 1 / 2-minute potion amount set to %s (%s x 10x clicks + %s single clicks).\n' "$input" "$ten_x_clicks" "$single_clicks"
+}
+
+action_set_plan_duration() {
+  local key="$1" label="$2"
+  if read_duration_ms "$label"; then
+    plan_set "$key" "$(ms_to_duration "$REPLY_MS")"
+    printf '%s set to %sms (%s).\n' "$label" "$REPLY_MS" "$(ms_to_duration "$REPLY_MS")"
+  fi
+}
+
+action_set_timing_duration() {
+  local key="$1" label="$2"
+  if read_duration_ms "$label"; then
+    timing_set_raw "$key" "$(ms_to_duration "$REPLY_MS")"
+    printf '%s set to %sms (%s).\n' "$label" "$REPLY_MS" "$(ms_to_duration "$REPLY_MS")"
+  fi
+}
+
+ensure_csv() {
+  if ! test -f "$CSV_FILE"; then
+    mkdir -p "$(dirname "$CSV_FILE")"
+    printf 'timestamp,potion_plan_enabled,potion_2_min_enabled,potion_2_min_amount,ten_x_clicks,single_clicks,potion_nav_click_interval,potion_click_interval,post_inventory_open_wait,post_potion_select_wait,post_potion_tier_wait,post_potion_sequence_wait,close_inventory,result,visible_timer,elapsed_ms,log_file,notes\n' > "$CSV_FILE"
+  fi
+}
+
+csv_clean() {
+  printf '%s' "$1" | tr ',\n\r' ';  ' | sed -E 's/ +$//'
+}
+
+append_result_csv() {
+  local ts="$1" result="$2" visible_timer="$3" elapsed_ms="$4" log_file="$5" notes="$6"
+  local amount decomposed ten_x_clicks single_clicks
+  amount="$(plan_get POTION_2_MIN_USE_AMOUNT)"
+  decomposed="$(decompose_amount "$amount")"
+  ten_x_clicks="${decomposed%% *}"
+  single_clicks="${decomposed#* }"
+  ensure_csv
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$ts" \
+    "$(plan_get POTION_PLAN_ENABLED)" \
+    "$(plan_get POTION_2_MIN_ENABLED)" \
+    "$amount" \
+    "$ten_x_clicks" \
+    "$single_clicks" \
+    "$(plan_get POTION_NAV_CLICK_INTERVAL)" \
+    "$(plan_get POTION_CLICK_INTERVAL)" \
+    "$(timing_get_raw POST_INVENTORY_OPEN_WAIT)" \
+    "$(timing_get_raw POST_POTION_SELECT_WAIT)" \
+    "$(timing_get_raw POST_POTION_TIER_WAIT)" \
+    "$(timing_get_raw POST_POTION_SEQUENCE_WAIT)" \
+    "$(plan_get CLOSE_INVENTORY)" \
+    "$(csv_clean "$result")" \
+    "$(csv_clean "$visible_timer")" \
+    "$elapsed_ms" \
+    "$(csv_clean "$log_file")" \
+    "$(csv_clean "$notes")" \
+    >> "$CSV_FILE"
+  printf 'Result appended to %s\n' "$CSV_FILE"
+}
+
+action_dry_run() {
+  local ts log rc
+  ts="$(date +%Y%m%d-%H%M%S)"
+  log="$LOG_DIR/potion_tuner_dry_run_${ts}.txt"
+  mkdir -p "$LOG_DIR"
+  printf 'Dry-run command:\n'
+  printf '  ./bin/macroctl dry-run potion-runner\n\n'
+  (cd "$PROJECT_ROOT" && ./bin/macroctl dry-run potion-runner) 2>&1 | tee "$log"
+  rc="${PIPESTATUS[0]}"
+  printf '\nDry-run output saved to: %s\n' "$log"
+  return "$rc"
+}
+
+read_result_value() {
+  local input
+  while true; do
+    read -r -p 'Potions applied correctly? yes/no/partial: ' input
+    case "$input" in
+      yes|no|partial)
+        REPLY_RESULT="$input"
+        return 0
+        ;;
+      *)
+        printf 'Please enter yes, no, or partial.\n'
+        ;;
+    esac
+  done
+}
+
+action_live_test() {
+  local ts log start_ms end_ms elapsed_ms confirm rc result visible_timer notes
+
+  printf '\n==================== LIVE POTION TEST ====================\n'
+  printf 'This will click inside Sober/Gamescope. Make sure the game is ready and the expected UI state is visible.\n'
+  printf 'This runs one potion-runner test only. It does not run placement.\n\n'
+
+  printf 'Exact command to be run:\n'
+  printf '  MACRO_INPUT_MODE=live \\\n'
+  printf '  MACRO_LIVE_INPUT_ALLOWED=1 \\\n'
+  printf '  MACRO_POTION_RUNNER_LIVE_CONFIRM=YES \\\n'
+  printf '  ./bin/macroctl live potion-runner\n\n'
+
+  read -r -p 'Type RUN to start one live potion test: ' confirm
+  if test "$confirm" != "RUN"; then
+    printf 'Live potion test cancelled (you did not type RUN).\n'
+    return
+  fi
+
+  ts="$(date +%Y%m%d-%H%M%S)"
+  log="$LOG_DIR/potion_tuner_live_${ts}.txt"
+  mkdir -p "$LOG_DIR"
+
+  start_ms="$(date +%s%3N)"
+  (cd "$PROJECT_ROOT" && \
+    MACRO_INPUT_MODE=live \
+    MACRO_LIVE_INPUT_ALLOWED=1 \
+    MACRO_POTION_RUNNER_LIVE_CONFIRM=YES \
+      ./bin/macroctl live potion-runner) 2>&1 | tee "$log"
+  rc="${PIPESTATUS[0]}"
+  end_ms="$(date +%s%3N)"
+  elapsed_ms=$((end_ms - start_ms))
+
+  printf 'elapsed_ms=%s\n' "$elapsed_ms" >> "$log"
+  printf '\nLive potion output saved to: %s\n' "$log"
+  printf 'Elapsed: %sms\n' "$elapsed_ms"
+  printf 'Exit code: %s\n' "$rc"
+
+  if command -v wl-copy >/dev/null 2>&1; then
+    wl-copy < "$log" && printf 'Log copied to clipboard (wl-copy).\n'
+  else
+    printf 'wl-copy not found; skipping clipboard copy.\n'
+  fi
+
+  printf '\nLog the result of this potion test:\n'
+  REPLY_RESULT=""
+  read_result_value
+  result="$REPLY_RESULT"
+  read -r -p 'Visible result/timer: ' visible_timer
+  read -r -p 'Notes: ' notes
+  append_result_csv "$ts" "$result" "$visible_timer" "$elapsed_ms" "$log" "$notes"
+  return "$rc"
+}
+
+action_record_manual() {
+  local ts result visible_timer notes
+  ts="$(date +%Y%m%d-%H%M%S)"
+  printf 'Record a result for the CURRENT settings (no test is run):\n'
+  REPLY_RESULT=""
+  read_result_value
+  result="$REPLY_RESULT"
+  read -r -p 'Visible result/timer: ' visible_timer
+  read -r -p 'Notes: ' notes
+  append_result_csv "$ts" "$result" "$visible_timer" "" "manual" "$notes"
+}
+
+action_show_results() {
+  if ! test -f "$CSV_FILE"; then
+    printf 'No results recorded yet (%s does not exist).\n' "$CSV_FILE"
+    return
+  fi
+  printf 'Recent potion tuning results (%s):\n\n' "$CSV_FILE"
+  head -n1 "$CSV_FILE"
+  tail -n +2 "$CSV_FILE" | tail -n 10
+}
+
+action_backup() {
+  local ts timing_dest plan_dest
+  mkdir -p "$PATCH_DIR"
+  ts="$(date +%Y%m%d-%H%M%S)"
+  timing_dest="$PATCH_DIR/potion_tuner_timing_backup_${ts}.conf"
+  plan_dest="$PATCH_DIR/potion_tuner_plan_backup_${ts}.conf"
+  cp "$RUNTIME_TIMING" "$timing_dest"
+  cp "$RUNTIME_PLAN" "$plan_dest"
+  printf 'Backed up runtime potion/timing config:\n'
+  printf '  %s\n' "$timing_dest"
+  printf '  %s\n' "$plan_dest"
+}
+
+action_restore() {
+  local plan_files=() paired_ts=() file base ts timing_file choice idx current_backup_ts
+  mkdir -p "$PATCH_DIR"
+  shopt -s nullglob
+  plan_files=( "$PATCH_DIR"/potion_tuner_plan_backup_*.conf )
+  shopt -u nullglob
+
+  for file in "${plan_files[@]}"; do
+    base="$(basename "$file")"
+    ts="${base#potion_tuner_plan_backup_}"
+    ts="${ts%.conf}"
+    timing_file="$PATCH_DIR/potion_tuner_timing_backup_${ts}.conf"
+    if test -f "$timing_file"; then
+      paired_ts+=( "$ts" )
+    fi
+  done
+
+  if test "${#paired_ts[@]}" -eq 0; then
+    printf 'No paired potion tuner backups found in %s\n' "$PATCH_DIR"
+    return
+  fi
+
+  IFS=$'\n' paired_ts=($(printf '%s\n' "${paired_ts[@]}" | sort -r))
+  unset IFS
+
+  printf 'Recent paired potion tuner backups:\n'
+  idx=1
+  for ts in "${paired_ts[@]}"; do
+    printf '  %s) %s\n' "$idx" "$ts"
+    idx=$((idx + 1))
+    if test "$idx" -gt 11; then
+      break
+    fi
+  done
+
+  read -r -p 'Restore which number? (blank to cancel): ' choice
+  if test -z "$choice"; then
+    printf 'Cancelled.\n'
+    return
+  fi
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || test "$choice" -lt 1 || test "$choice" -gt "${#paired_ts[@]}" || test "$choice" -gt 10; then
+    printf 'Invalid selection.\n'
+    return
+  fi
+
+  current_backup_ts="$(date +%Y%m%d-%H%M%S)"
+  cp "$RUNTIME_TIMING" "$PATCH_DIR/potion_tuner_timing_backup_${current_backup_ts}.conf"
+  cp "$RUNTIME_PLAN" "$PATCH_DIR/potion_tuner_plan_backup_${current_backup_ts}.conf"
+  ts="${paired_ts[$((choice - 1))]}"
+  cp "$PATCH_DIR/potion_tuner_timing_backup_${ts}.conf" "$RUNTIME_TIMING"
+  cp "$PATCH_DIR/potion_tuner_plan_backup_${ts}.conf" "$RUNTIME_PLAN"
+  printf 'Backed up current config as %s, then restored paired backup %s.\n' "$current_backup_ts" "$ts"
+}
+
+action_apply_recommended_defaults() {
+  local confirm
+  printf 'Recommended first tuning values:\n'
+  printf '  POST_INVENTORY_OPEN_WAIT=100ms\n'
+  printf '  POST_POTION_SELECT_WAIT=100ms\n'
+  printf '  POST_POTION_TIER_WAIT=100ms\n'
+  printf '  POST_POTION_SEQUENCE_WAIT=150ms\n'
+  printf '  POTION_NAV_CLICK_INTERVAL=50ms\n'
+  printf '  POTION_CLICK_INTERVAL=100ms\n'
+  printf '  POTION_2_MIN_USE_AMOUNT=40\n'
+  read -r -p 'Apply these values? Type YES to confirm: ' confirm
+  if test "$confirm" != "YES"; then
+    printf 'Cancelled.\n'
+    return
+  fi
+  action_backup
+  timing_set_raw POST_INVENTORY_OPEN_WAIT 100ms
+  timing_set_raw POST_POTION_SELECT_WAIT 100ms
+  timing_set_raw POST_POTION_TIER_WAIT 100ms
+  timing_set_raw POST_POTION_SEQUENCE_WAIT 150ms
+  plan_set POTION_NAV_CLICK_INTERVAL 50ms
+  plan_set POTION_CLICK_INTERVAL 100ms
+  plan_set POTION_2_MIN_USE_AMOUNT 40
+  printf 'Recommended first tuning values applied.\n'
+}
+
+show_menu() {
+  printf '\nMenu:\n'
+  printf '  1. Set Hatch 1 / 2-minute potion amount\n'
+  printf '  2. Set potion nav click interval\n'
+  printf '  3. Set potion use click interval\n'
+  printf '  4. Set wait after inventory/menu open\n'
+  printf '  5. Set wait after potion tier select\n'
+  printf '  6. Set wait after potion tier complete\n'
+  printf '  7. Set wait after full potion sequence\n'
+  printf '  8. Toggle close inventory after use\n'
+  printf '  9. Toggle Hatch 1 / 2-minute potion enabled\n'
+  printf '  10. Toggle potion plan enabled\n'
+  printf '  11. Dry-run potion runner\n'
+  printf '  12. Run one live potion test\n'
+  printf '  13. Record result manually\n'
+  printf '  14. Show recent potion tuning results\n'
+  printf '  d) Apply recommended first tuning values\n'
+  printf '  b) Backup current potion/timing runtime config\n'
+  printf '  r) Restore recent potion tuner backup\n'
+  printf '  q) Quit\n'
+}
+
+menu_loop() {
+  local choice
+  while true; do
+    clear 2>/dev/null || true
+    print_current
+    show_menu
+    read -r -p 'Select: ' choice
+    printf '\n'
+    case "$choice" in
+      1) action_set_amount ;;
+      2) action_set_plan_duration POTION_NAV_CLICK_INTERVAL 'New potion nav click interval' ;;
+      3) action_set_plan_duration POTION_CLICK_INTERVAL 'New potion use click interval' ;;
+      4) action_set_timing_duration POST_INVENTORY_OPEN_WAIT 'New wait after inventory/menu open' ;;
+      5) action_set_timing_duration POST_POTION_SELECT_WAIT 'New wait after potion tier select' ;;
+      6) action_set_timing_duration POST_POTION_TIER_WAIT 'New wait after potion tier complete' ;;
+      7) action_set_timing_duration POST_POTION_SEQUENCE_WAIT 'New wait after full potion sequence' ;;
+      8) read_bool_toggle "$RUNTIME_PLAN" CLOSE_INVENTORY 'Close inventory after use' ;;
+      9) read_bool_toggle "$RUNTIME_PLAN" POTION_2_MIN_ENABLED 'Hatch 1 / 2-minute potion enabled' ;;
+      10) read_bool_toggle "$RUNTIME_PLAN" POTION_PLAN_ENABLED 'Potion plan enabled' ;;
+      11) action_dry_run ;;
+      12) action_live_test ;;
+      13) action_record_manual ;;
+      14) action_show_results ;;
+      d|D) action_apply_recommended_defaults ;;
+      b|B) action_backup ;;
+      r|R) action_restore ;;
+      q|Q) printf 'Bye.\n'; return 0 ;;
+      *) printf 'Unknown option: %s\n' "$choice" ;;
+    esac
+    printf '\nPress Enter to continue...'
+    read -r _
+  done
+}
+
+usage() {
+  cat <<EOF
+Usage: potion-tuner [OPTION]
+
+A terminal UI for tuning Pack Opener potion timing and amount.
+With no option it launches the interactive menu.
+
+Options:
+  --help            Show this help and exit.
+  --print-current   Print current potion runtime settings and exit.
+  --dry-run-once    Run ./bin/macroctl dry-run potion-runner once and exit.
+
+Interactive actions:
+  1-7   Set Hatch 1 / 2-minute amount and potion delay/timing values.
+  8-10  Toggle close inventory, Hatch 1 / 2-minute enabled, and plan enabled.
+  11    Dry-run potion runner only.
+  12    Run one live potion-runner test only, after typed RUN confirmation.
+  13    Record a manual result to potion_tuning_results.csv.
+  14    Show recent potion tuning results.
+  d     Apply recommended first tuning values after creating a backup.
+  b/r   Backup and restore paired runtime potion/timing configs.
+  q     Quit.
+
+Safety:
+  * Edits only runtime_config/pack_opener/potion_plan.conf and timing.conf.
+  * Does not edit placement keys, walking durations, PACK_CLICK_POINT, or flow.
+  * Does not call xdotool/ydotool directly.
+  * Live input only runs through ./bin/macroctl live potion-runner.
+EOF
+}
+
+main() {
+  ensure_runtime
+  case "${1:-}" in
+    --help|-h)
+      usage
+      ;;
+    --print-current)
+      print_current
+      ;;
+    --dry-run-once)
+      action_dry_run
+      ;;
+    "")
+      menu_loop
+      ;;
+    *)
+      printf 'Unknown option: %s\n\n' "$1" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"
