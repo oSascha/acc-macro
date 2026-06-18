@@ -54,6 +54,21 @@ git status --short --untracked-files=all | grep -E '05_debug|\.log|\.trace'
 
 If any of those commands produce unexpected output, do not push until resolved.
 
+## Public Coordinate Presets
+
+The `presets/800x600_known_good/` directory contains pre-filled coordinate values
+for a known-good 800x600 Gamescope setup. These are safe to commit and share:
+
+- They contain only screen coordinates and timing values
+- They do not contain any private server URL — `RECOVERY_PRIVATE_SERVER_URL=` is
+  intentionally blank in the preset
+- Recovery is disabled by default (`RECOVERY_ENABLED=0`) in the preset
+- No personal paths or credentials are included
+
+When using the setup wizard or copying the preset manually, the coordinates land
+in `runtime_config/` (gitignored). The preset files themselves stay in `presets/`
+and are safe to track.
+
 ## What Is Safe to Push
 
 The following are public-safe and committed:
@@ -61,6 +76,7 @@ The following are public-safe and committed:
 - `bin/` — executable scripts (no hardcoded credentials)
 - `src/` — library and module source (reads config at runtime from `runtime_config/`)
 - `config_templates/` — starter config files with **empty placeholder values**
+- `presets/` — public coordinate presets for known-good window configurations
 - `tests/` — dry-run and static validation tests
 - `docs/` — setup and compatibility documentation
 - `samples/` — example config files with placeholder values only

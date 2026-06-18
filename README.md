@@ -25,70 +25,65 @@ Originally developed and tested on:
 | Nest session| Gamescope nested inside the Wayland compositor |
 | Input tool  | xdotool (X11, targeting the nested display)    |
 
-**Pop!_OS compatibility is expected** but requires setup and calibration.
+**Pop!_OS compatibility is expected** and an included setup wizard makes it easy.
 See [docs/SETUP_POP_OS.md](docs/SETUP_POP_OS.md).
 
-## Important: Manual Calibration Required
+## Quick Start (Pop!_OS — Recommended)
+
+The easiest way to get started is the setup wizard:
+
+```bash
+# 1. Clone and enter the repo
+git clone <repo-url> acc
+cd acc
+
+# 2. Make the setup wizard executable and run it
+chmod +x bin/setup-acc
+./bin/setup-acc
+```
+
+The wizard will:
+- Check your system and installed programs
+- Offer to install missing dependencies via `apt` (asks before running sudo)
+- Offer to install Sober via Flatpak
+- Create your local `runtime_config/` folder
+- Let you choose the **800x600 preset** (pre-filled coordinates) or a **blank config**
+- Optionally store your private server URL for recovery restarts
+- Run non-live validation checks
+
+**The wizard does not run the live macro.** Test carefully before running live.
+
+### Setup wizard flags
+
+```bash
+./bin/setup-acc           # Full interactive setup
+./bin/setup-acc --check   # Check system and config status only (no writes)
+./bin/setup-acc --dry-run # Print what the setup would do, without doing it
+./bin/setup-acc --help    # Show help
+```
+
+## Manual Setup (Alternative)
+
+If you prefer to set up manually, see [docs/SETUP_POP_OS.md](docs/SETUP_POP_OS.md).
+
+## Important: Calibration Required
 
 All screen coordinates are specific to your monitor resolution, Gamescope window
-size, and display scaling. **No pre-filled coordinates are committed here.**
+size, and display scaling. The included 800x600 preset only works if your setup
+matches. If clicks land in the wrong place, calibrate manually.
 
-After copying config templates you must calibrate every point before running in
-live mode. See [docs/CALIBRATION.md](docs/CALIBRATION.md).
-
-## Quick Start (Pop!_OS)
-
-1. Install dependencies:
-
-   ```bash
-   sudo apt update
-   sudo apt install -y bash coreutils grep sed gawk python3 \
-     xdotool xdg-utils flatpak gamescope wl-clipboard
-   ```
-
-2. Install Sober via Flatpak:
-
-   ```bash
-   flatpak install flathub org.vinegarhq.Sober
-   ```
-
-3. Clone this repo and enter it:
-
-   ```bash
-   git clone <repo-url> acc
-   cd acc
-   ```
-
-4. Copy config templates into `runtime_config/`:
-
-   ```bash
-   cp -r config_templates/* runtime_config/
-   # (runtime_config/ is gitignored — safe to store your private settings here)
-   ```
-
-5. Calibrate your coordinates (see [docs/CALIBRATION.md](docs/CALIBRATION.md)).
-
-6. Start Gamescope with Sober, then run a dry-run to validate:
-
-   ```bash
-   ./bin/acc --dry-run
-   ```
-
-7. Once dry-run passes, run live:
-
-   ```bash
-   ./bin/acc
-   ```
+See [docs/CALIBRATION.md](docs/CALIBRATION.md).
 
 ## Repository Layout
 
 ```
-bin/                  Executable entry points (acc, macroctl, pack-opener-ui, ...)
+bin/                  Executable entry points (acc, macroctl, setup-acc, ...)
 src/                  Source library and module scripts
-config_templates/     Starter config files — copy to runtime_config/ and calibrate
+config_templates/     Starter config files — blank placeholders
+presets/              Ready-to-use configs for known-good setups
+  800x600_known_good/ Pre-filled coordinates for 800x600 Gamescope window
 tests/                Dry-run and static validation tests
 docs/                 Setup, calibration, and security documentation
-samples/              Example config files with placeholder values (safe to read)
 runtime_config/       Your local runtime config (gitignored — never committed)
 ```
 
@@ -97,7 +92,6 @@ runtime_config/       Your local runtime config (gitignored — never committed)
 This repository intentionally omits:
 
 - Private Roblox server URLs (set locally in `runtime_config/recovery/defaults.conf`)
-- Calibrated screen coordinates (must be filled in `runtime_config/` after calibration)
 - Debug logs and run snapshots
 - Internal development notes and implementation contracts
 

@@ -1,6 +1,7 @@
 # Private folders — never commit these
 runtime_config/
 runtime_config/**/*
+runtime_config.backup.*/
 00_handoff/
 00_handoff/**/*
 01_docs/

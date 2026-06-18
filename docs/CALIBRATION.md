@@ -84,6 +84,29 @@ in `config_templates/` then fill in each value.
 - The `./bin/macroctl validate-config pack-opener` command checks for missing
   required points and reports them.
 
+## Using the 800x600 Preset
+
+The repository includes a pre-filled coordinate preset for 800x600 Gamescope
+windows at `presets/800x600_known_good/`. The setup wizard (`./bin/setup-acc`)
+will offer to copy it into `runtime_config/` for you.
+
+**The preset only works if:**
+- Your Gamescope window is 800x600 (started with `gamescope -W 800 -H 600 ...`)
+- Your Roblox UI layout matches the layout it was calibrated on
+
+**If clicks land in the wrong place:**
+1. Open the relevant `runtime_config/*/points.conf` file
+2. Start Gamescope with Sober inside it
+3. Use `xdotool` to recalibrate each coordinate that is wrong:
+   ```bash
+   DISPLAY=:1 xdotool getmouselocation --shell
+   ```
+4. Move your mouse to the button, run the command, record the `X=` and `Y=` values
+
+Recovery button coordinates (`runtime_config/recovery/points.conf`) are not
+included in the preset — they must always be calibrated manually because they
+depend on in-game UI state at reconnect time.
+
 ## Never Commit Calibrated Values
 
 `runtime_config/` is gitignored. Keep your calibrated coordinates there.
