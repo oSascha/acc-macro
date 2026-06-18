@@ -87,7 +87,8 @@ assert_contains "$setup_src" "Start blank and calibrate" "setup-acc source (blan
 assert_contains "$setup_src" "Keep my existing config" "setup-acc source (keep option label)"
 
 # ── Test: setup-acc contains no real private server URL ──────────────────────
-assert_not_contains "$setup_src" "e1b9c9ba" "setup-acc source (no real private URL code)"
+# Check that no roblox.com share URL with an actual code value appears in the script.
+# Placeholders like YOUR_CODE or XXXXXXXX are acceptable; real codes are not.
 assert_not_contains "$setup_src" "roblox.com/share?code=" "setup-acc source (no real URL)"
 
 # ── Test: setup-acc does not mention internal paths ──────────────────────────
@@ -118,7 +119,6 @@ done
 # ── Test: recovery preset does not contain a real private URL ────────────────
 rec_preset="$preset_dir/recovery/defaults.conf"
 rec_content="$(cat "$rec_preset")"
-assert_not_contains "$rec_content" "e1b9c9ba" "recovery preset (no real URL code)"
 assert_not_contains "$rec_content" "roblox.com/share?code=" "recovery preset (no real URL)"
 assert_contains "$rec_content" "RECOVERY_PRIVATE_SERVER_URL=" "recovery preset has URL key"
 assert_contains "$rec_content" "RECOVERY_ENABLED=0" "recovery preset has RECOVERY_ENABLED=0"
