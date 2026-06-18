@@ -58,10 +58,6 @@ else
   fail "--check exited non-zero"
 fi
 assert_contains "$check_out" "Status" "--check output"
-
-# Confirm --check did not create runtime_config if it didn't exist before
-# (We can only verify this isn't a side-effect by checking the script logic,
-# but we also confirm no apt/flatpak install was triggered by checking output)
 assert_not_contains "$check_out" "sudo apt" "--check output (no apt in check mode)"
 assert_not_contains "$check_out" "flatpak install" "--check output (no flatpak install in check mode)"
 
@@ -75,9 +71,7 @@ fi
 assert_contains "$dry_out" "dry-run" "--dry-run output"
 assert_contains "$dry_out" "Would" "--dry-run output (describes planned steps)"
 assert_contains "$dry_out" "800x600" "--dry-run output mentions preset"
-
-# ── Test: --dry-run does not run apt or flatpak install ──────────────────────
-assert_not_contains "$dry_out" "Get:1" "--dry-run does not run apt (no apt output)"
+assert_not_contains "$dry_out" "Get:1" "--dry-run does not run apt"
 assert_not_contains "$dry_out" "Installing org.vinegarhq.Sober" "--dry-run does not install Sober"
 
 # ── Test: setup-acc uses simple words in menu labels ─────────────────────────
@@ -87,13 +81,16 @@ assert_contains "$setup_src" "Start blank and calibrate" "setup-acc source (blan
 assert_contains "$setup_src" "Keep my existing config" "setup-acc source (keep option label)"
 
 # ── Test: setup-acc contains no real private server URL ──────────────────────
-# Check that no roblox.com share URL with an actual code value appears in the script.
-# Placeholders like YOUR_CODE or XXXXXXXX are acceptable; real codes are not.
+# Placeholders like YOUR_CODE or XXXXXXXX are acceptable; actual share URLs are not.
 assert_not_contains "$setup_src" "roblox.com/share?code=" "setup-acc source (no real URL)"
 
-# ── Test: setup-acc does not mention internal paths ──────────────────────────
-assert_not_contains "$setup_src" "/home/chino" "setup-acc source (no private path)"
-assert_not_contains "$setup_src" "/home/sascha" "setup-acc source (no private path)"
+# ── Test: setup-acc contains no hardcoded personal home paths ────────────────
+# Pattern check — personal usernames (PERSONAL_HOME_PATH) are not stored in this file.
+if grep -qE '/home/[a-z][a-z0-9_-]+' "$setup_acc"; then
+  fail "setup-acc source contains a hardcoded home path (PERSONAL_HOME_PATH check)"
+else
+  pass "setup-acc source contains no hardcoded home paths"
+fi
 
 # ── Test: preset files exist ─────────────────────────────────────────────────
 preset_dir="$project_root/presets/800x600_known_good"
@@ -123,7 +120,6 @@ assert_not_contains "$rec_content" "roblox.com/share?code=" "recovery preset (no
 assert_contains "$rec_content" "RECOVERY_PRIVATE_SERVER_URL=" "recovery preset has URL key"
 assert_contains "$rec_content" "RECOVERY_ENABLED=0" "recovery preset has RECOVERY_ENABLED=0"
 
-# ── Test: preset recovery URL value is blank ─────────────────────────────────
 rec_url_val="$(grep '^RECOVERY_PRIVATE_SERVER_URL=' "$rec_preset" | cut -d= -f2-)"
 if test -z "$rec_url_val"; then
   pass "recovery preset URL value is blank (correct)"
@@ -132,12 +128,12 @@ else
 fi
 
 # ── Test: preset mentions 800x600 ────────────────────────────────────────────
-pack_pts_content="$(cat "$preset_dir/pack_opener/points.conf")"
+pack_pts="$preset_dir/pack_opener/points.conf"
+pack_pts_content="$(cat "$pack_pts")"
 assert_contains "$pack_pts_content" "800x600" "pack_opener/points.conf mentions resolution"
 
 # ── Test: .gitignore still ignores runtime_config/ ───────────────────────────
-gitignore="$project_root/.gitignore"
-gitignore_content="$(cat "$gitignore")"
+gitignore_content="$(cat "$project_root/.gitignore")"
 assert_contains "$gitignore_content" "runtime_config/" ".gitignore covers runtime_config/"
 
 # ── Test: runtime_config/ is not tracked ─────────────────────────────────────
@@ -151,9 +147,8 @@ fi
 if git -C "$project_root" ls-files --error-unmatch "presets/800x600_known_good/pack_opener/points.conf" >/dev/null 2>&1; then
   pass "presets/800x600_known_good/pack_opener/points.conf is tracked by git"
 else
-  # It may not be committed yet — just check it's a tracked file candidate
   if test -f "$preset_dir/pack_opener/points.conf"; then
-    pass "preset file exists (not yet committed — check after commit)"
+    pass "preset file exists on disk"
   else
     fail "preset file missing from disk"
   fi
@@ -166,11 +161,77 @@ else
   fail "bin/setup-acc failed bash -n syntax check"
 fi
 
-# ── Test: no internal paths in preset files ───────────────────────────────────
-if grep -rE '/home/chino|/home/sascha' "$preset_dir" >/dev/null 2>&1; then
-  fail "preset files contain internal paths (/home/chino or /home/sascha)"
+# ── Test: no hardcoded home paths in preset files ────────────────────────────
+# Pattern check — personal usernames (PERSONAL_HOME_PATH) are not stored here.
+if grep -rqE '/home/[a-z][a-z0-9_-]+' "$preset_dir" 2>/dev/null; then
+  fail "preset files contain hardcoded home paths (PERSONAL_HOME_PATH check)"
 else
-  pass "preset files contain no internal paths"
+  pass "preset files contain no hardcoded home paths"
+fi
+
+# ── Test: preset pack_opener/points.conf has all expected keys ───────────────
+for key in \
+  BASE_TELEPORT_BUTTON_X BASE_TELEPORT_BUTTON_Y \
+  PLACE_HOLD_POINT_X PLACE_HOLD_POINT_Y \
+  PACK_CLICK_POINT_X PACK_CLICK_POINT_Y \
+  MENU_BUTTON_X MENU_BUTTON_Y \
+  CLOSE_BUTTON_X CLOSE_BUTTON_Y
+do
+  if grep -qE "^${key}=" "$pack_pts"; then
+    pass "pack_opener/points.conf has key: $key"
+  else
+    fail "pack_opener/points.conf missing expected key: $key"
+  fi
+done
+
+# ── Test: preset market_buyer/points.conf has all expected keys ──────────────
+market_pts="$preset_dir/market_buyer/points.conf"
+for key in TOP_MARKET_BUTTON_X TOP_MARKET_BUTTON_Y MARKET_BUY_ALL_X MARKET_BUY_ALL_Y; do
+  if grep -qE "^${key}=" "$market_pts"; then
+    pass "market_buyer/points.conf has key: $key"
+  else
+    fail "market_buyer/points.conf missing expected key: $key"
+  fi
+done
+
+# ── Test: preset figurines_buyer/points.conf has all expected keys ───────────
+figurines_pts="$preset_dir/figurines_buyer/points.conf"
+for key in FIGURINES_BUY_ALL_X FIGURINES_BUY_ALL_Y; do
+  if grep -qE "^${key}=" "$figurines_pts"; then
+    pass "figurines_buyer/points.conf has key: $key"
+  else
+    fail "figurines_buyer/points.conf missing expected key: $key"
+  fi
+done
+
+# ── Test: preset pack_opener coordinate values are filled (not blank) ─────────
+for key in \
+  BASE_TELEPORT_BUTTON_X BASE_TELEPORT_BUTTON_Y \
+  PLACE_HOLD_POINT_X PLACE_HOLD_POINT_Y \
+  PACK_CLICK_POINT_X PACK_CLICK_POINT_Y \
+  MENU_BUTTON_X MENU_BUTTON_Y \
+  CLOSE_BUTTON_X CLOSE_BUTTON_Y
+do
+  val="$(grep -E "^${key}=" "$pack_pts" | cut -d= -f2-)"
+  if test -n "$val"; then
+    pass "pack_opener/points.conf $key has a value"
+  else
+    fail "pack_opener/points.conf $key is blank (expected a coordinate in the 800x600 preset)"
+  fi
+done
+
+# ── Test: no malformed/truncated keys in preset or template files ─────────────
+# These substrings would indicate a key name that lost its leading character.
+# Anchored to line start to avoid false matches within valid full key names.
+malformed_ok=1
+for truncated in ASE_TELEPORT LACE_HOLD ACK_CLICK ENU_BUTTON LOSE_BUTTON; do
+  if grep -rqE "^${truncated}" "$preset_dir" "$project_root/config_templates" 2>/dev/null; then
+    fail "found malformed/truncated key starting with: $truncated"
+    malformed_ok=0
+  fi
+done
+if test "$malformed_ok" = "1"; then
+  pass "no malformed/truncated keys found in preset or template files"
 fi
 
 printf '\nAll setup-acc dry-run tests passed.\n'
