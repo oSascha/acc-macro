@@ -1,4 +1,4 @@
-# ACC — Automated Cycle Controller
+# ACC - Automated Cycle Controller
 
 ACC is a Bash-based local automation macro for Roblox on Linux. It runs through
 [Sober](https://sober.vinegarhq.org/) (the Roblox Flatpak client) inside a nested
