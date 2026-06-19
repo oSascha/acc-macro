@@ -21,6 +21,8 @@ HAS_APT=0
 
 DEPS_MISSING=()
 SOBER_INSTALLED=0
+PROFILE_SELECTED=""
+LAUNCHER_INSTALLED=0
 
 RC_DIR="$project_root/runtime_config"
 
@@ -408,6 +410,442 @@ _apply_blank_config() {
   print_info "See docs/CALIBRATION.md for step-by-step instructions."
 }
 
+# ── Profile selection ─────────────────────────────────────────────────────────
+
+choose_setup_profile() {
+  print_header "Step 2 — Choose your setup profile"
+
+  printf '\n'
+  printf '         Which setup profile do you want?\n\n'
+  printf '         1) Known-good 800x600 Sober/Gamescope  %s(recommended)%s\n' "$(printf '\033[90m')" "$(printf '\033[0m')"
+  printf '            Pre-configured for a working 800x600 Gamescope+Sober setup.\n'
+  printf '            Includes calibrated pack opener coordinates.\n'
+  printf '            Safe startup state:\n'
+  printf '              Pack Opener:      ENABLED\n'
+  printf '              Market Buyer:     DISABLED  (enable after calibration)\n'
+  printf '              Figurines Buyer:  DISABLED  (enable after calibration)\n'
+  printf '              Recovery:         DISABLED  (enable after setting private URL)\n'
+  printf '              Event Voter:      DISABLED  (enable after adding training images)\n'
+  printf '\n'
+  printf '         2) Custom / manual configuration\n'
+  printf '            Start blank and calibrate everything yourself.\n'
+  printf '            Choose this if your screen size or window size differs.\n'
+  printf '\n'
+  printf '         Choice [1/2]: '
+  local choice
+  read -r choice
+  choice="${choice:-1}"
+  case "$choice" in
+    1)
+      PROFILE_SELECTED="known_good_800x600"
+      print_ok "Profile: Known-good 800x600 Sober/Gamescope"
+      ;;
+    2)
+      PROFILE_SELECTED="custom"
+      print_ok "Profile: Custom / manual"
+      ;;
+    *)
+      print_warn "Unknown choice. Using known-good 800x600."
+      PROFILE_SELECTED="known_good_800x600"
+      ;;
+  esac
+}
+
+# ── Known-good profile runtime config setup ───────────────────────────────────
+
+setup_runtime_config_known_good() {
+  print_header "Step 6 — Apply known-good 800x600 config"
+
+  print_info "Copying the known-good 800x600 preset to runtime_config/."
+  print_info "This sets up all configs with safe, pre-calibrated values."
+  print_info ""
+
+  if test "$DRY_RUN" = "1"; then
+    if test -d "$RC_DIR"; then
+      print_info "[dry-run] runtime_config/ already exists."
+      print_info "[dry-run] Would back it up with a timestamp, then replace it."
+    else
+      print_info "[dry-run] Would create runtime_config/ and apply 800x600 preset."
+    fi
+    return 0
+  fi
+
+  if test -d "$RC_DIR"; then
+    local ts
+    ts="$(date +%Y%m%d-%H%M%S)"
+    local backup_name="runtime_config.backup.$ts"
+    print_info "Existing runtime_config/ found — backing up to: $backup_name"
+    mv "$RC_DIR" "$project_root/$backup_name"
+    print_ok "Backed up: $backup_name"
+  fi
+
+  mkdir -p "$RC_DIR"
+  apply_preset_800x600
+}
+
+# ── Launcher installation ─────────────────────────────────────────────────────
+
+install_acc_launcher() {
+  print_header "Step 9 — Install the acc terminal command"
+
+  printf '         This installs ~/.local/bin/acc so you can type "acc" from any\n'
+  printf '         terminal. The launcher sets required env vars and cds to the repo.\n'
+  printf '\n'
+
+  local launcher_dir="$HOME/.local/bin"
+  local launcher_path="$launcher_dir/acc"
+
+  if test "$DRY_RUN" = "1"; then
+    print_info "[dry-run] Would install: $launcher_path"
+    print_info "[dry-run] Content:"
+    print_info "  #!/usr/bin/env bash"
+    print_info "  cd $project_root"
+    print_info "  export MACRO_INPUT_MODE=live"
+    print_info "  export MACRO_LIVE_INPUT_ALLOWED=1"
+    print_info "  export MACRO_LIVE_CYCLE_RUNNER_CONFIRM=YES"
+    print_info "  exec ./bin/acc \"\$@\""
+    return 0
+  fi
+
+  # Detect and refuse a recursive wrapper (launcher pointing to itself).
+  if test -f "$launcher_path"; then
+    if grep -qF "$launcher_path" "$launcher_path" 2>/dev/null; then
+      print_warn "Found recursive launcher (points to itself) — replacing."
+      rm -f "$launcher_path"
+    else
+      print_info "Replacing existing launcher."
+    fi
+  fi
+
+  mkdir -p "$launcher_dir"
+
+  cat > "$launcher_path" << LAUNCHER_EOF
+#!/usr/bin/env bash
+# ACC launcher — installed by setup-acc
+# Repo: $project_root
+cd "$project_root" || { printf 'ERROR: Cannot cd to %s\n' "$project_root" >&2; exit 1; }
+export MACRO_INPUT_MODE=live
+export MACRO_LIVE_INPUT_ALLOWED=1
+export MACRO_LIVE_CYCLE_RUNNER_CONFIRM=YES
+exec ./bin/acc "\$@"
+LAUNCHER_EOF
+
+  chmod +x "$launcher_path"
+  LAUNCHER_INSTALLED=1
+  print_ok "Installed: $launcher_path"
+
+  _ensure_local_bin_in_path "$launcher_dir"
+}
+
+_ensure_local_bin_in_path() {
+  local bin_dir="${1:-$HOME/.local/bin}"
+
+  case ":$PATH:" in
+    *":$bin_dir:"*)
+      print_ok "$bin_dir is already in PATH"
+      return 0
+      ;;
+  esac
+
+  print_warn "$bin_dir is not in your current PATH."
+  print_info "Adding it to ~/.bashrc and ~/.zshrc so it is available in new terminals."
+  print_info ""
+
+  local profile_line='export PATH="$HOME/.local/bin:$PATH"'
+  local added_count=0
+
+  for rcfile in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    if test -f "$rcfile"; then
+      if ! grep -q '.local/bin' "$rcfile" 2>/dev/null; then
+        printf '\n# Added by ACC setup-acc\n%s\n' "$profile_line" >> "$rcfile"
+        print_ok "Added ~/.local/bin to PATH in: $rcfile"
+        added_count=$((added_count + 1))
+      else
+        print_info "~/.local/bin already referenced in: $rcfile"
+      fi
+    fi
+  done
+
+  if test "$added_count" -eq 0; then
+    print_warn "Could not auto-add PATH. Add this line to your shell profile:"
+    print_info "  $profile_line"
+  fi
+}
+
+# ── Final summary ─────────────────────────────────────────────────────────────
+
+show_final_summary() {
+  print_header "Setup complete — Summary"
+
+  printf '  Repo:    %s\n' "$project_root"
+  printf '  Profile: %s\n' "${PROFILE_SELECTED:-not selected}"
+  printf '\n'
+
+  print_header "  Dependencies"
+  for cmd in gamescope xdotool flatpak python3; do
+    if command_exists "$cmd"; then
+      print_ok "$cmd"
+    else
+      print_miss "$cmd"
+    fi
+  done
+  if test "$SOBER_INSTALLED" = "1"; then
+    print_ok "Sober (org.vinegarhq.Sober)"
+  else
+    print_warn "Sober — not installed"
+  fi
+  if test "$OPENCV_AVAILABLE" = "1"; then
+    print_ok "python3-opencv (Event Voter ready)"
+  else
+    print_warn "python3-opencv — not installed (Event Voter disabled)"
+  fi
+
+  print_header "  Config (runtime_config/)"
+  if test -d "$RC_DIR"; then
+    print_ok "runtime_config/ — exists"
+    _report_config_status
+  else
+    print_miss "runtime_config/ — not found"
+  fi
+
+  print_header "  Module toggles"
+  _report_toggle_status_from_config
+
+  print_header "  Event Voter"
+  local ev_training="$RC_DIR/event_voter/training"
+  if test -f "$ev_training/live_event_seed.png" && \
+     test -f "$ev_training/live_event_seed_mutation.png"; then
+    print_ok "Training images present"
+  else
+    print_warn "Training images not yet added"
+    print_info "See docs/EVENT_VOTER_EXPERIMENT.md"
+  fi
+
+  print_header "  acc command"
+  local launcher_path="$HOME/.local/bin/acc"
+  if test -f "$launcher_path"; then
+    print_ok "Installed: $launcher_path"
+  else
+    print_miss "Not installed (run setup again, or use ./bin/acc)"
+  fi
+
+  print_header "What to do next"
+  printf '\n'
+  printf '  1. Start Gamescope with Sober:\n'
+  printf '\n'
+  printf '       gamescope -W 800 -H 600 -r 60 --force-grab-cursor -- \\\n'
+  printf '         flatpak run org.vinegarhq.Sober\n'
+  printf '\n'
+  printf '  2. Run the ACC menu:\n'
+
+  if test -f "$HOME/.local/bin/acc"; then
+    case ":$PATH:" in
+      *":$HOME/.local/bin:"*)
+        printf '\n       Run: acc\n\n'
+        ;;
+      *)
+        printf '\n       Close this terminal, open a new terminal, run: acc\n\n'
+        ;;
+    esac
+  else
+    printf '\n       cd %s && ./bin/acc\n\n' "$project_root"
+  fi
+
+  printf '  3. Inside ACC: check module status (option 5), then start\n'
+  printf '     pack opener only (option 2). Watch a few cycles.\n'
+  printf '     Enable Market/Figurines Buyer only after calibration.\n'
+  printf '\n'
+  printf '  If setup fails, run the diagnostic tool:\n'
+  printf '    ./bin/setup-acc --diagnose\n'
+  printf '  Then send the file: ~/acc_setup_diagnose.txt\n'
+  printf '\n'
+}
+
+_report_toggle_status_from_config() {
+  local toggles_file="$RC_DIR/ui/toggles.conf"
+  local pack_t=1 market_t=0 figurines_t=0 recovery_t=0 ev_t=0
+
+  if test -f "$toggles_file"; then
+    local k v
+    while IFS='=' read -r k v; do
+      case "$k" in
+        '#'*|'') continue ;;
+        TOGGLE_PACK_OPENER)      pack_t="$v" ;;
+        TOGGLE_MARKET_BUYER)     market_t="$v" ;;
+        TOGGLE_FIGURINES_BUYER)  figurines_t="$v" ;;
+        TOGGLE_RECOVERY_RESTART) recovery_t="$v" ;;
+        TOGGLE_EVENT_VOTER)      ev_t="$v" ;;
+      esac
+    done < "$toggles_file" 2>/dev/null || true
+  else
+    local orch_defs="$RC_DIR/orchestrator/defaults.conf"
+    if test -f "$orch_defs"; then
+      local k v
+      while IFS='=' read -r k v; do
+        case "$k" in
+          '#'*|'') continue ;;
+          PACK_OPENER_ENABLED)     pack_t="$v" ;;
+          MARKET_BUYER_ENABLED)    market_t="$v" ;;
+          FIGURINES_BUYER_ENABLED) figurines_t="$v" ;;
+        esac
+      done < "$orch_defs" 2>/dev/null || true
+    fi
+    local rec_defs="$RC_DIR/recovery/defaults.conf"
+    if test -f "$rec_defs"; then
+      recovery_t="$(grep '^RECOVERY_ENABLED=' "$rec_defs" | tail -n1 | cut -d= -f2- || true)"
+    fi
+    local ev_defs="$RC_DIR/event_voter/defaults.conf"
+    if test -f "$ev_defs"; then
+      ev_t="$(grep '^EVENT_VOTER_ENABLED=' "$ev_defs" | tail -n1 | cut -d= -f2- || true)"
+    fi
+  fi
+
+  if test "${pack_t:-1}" = "1"; then
+    print_ok "Pack Opener — ENABLED"
+  else
+    print_warn "Pack Opener — DISABLED"
+  fi
+  if test "${market_t:-0}" = "1"; then
+    print_ok "Market Buyer — ENABLED"
+  else
+    print_warn "Market Buyer — DISABLED (enable after calibration in ACC menu → Module toggles)"
+  fi
+  if test "${figurines_t:-0}" = "1"; then
+    print_ok "Figurines Buyer — ENABLED"
+  else
+    print_warn "Figurines Buyer — DISABLED (enable after calibration)"
+  fi
+  if test "${recovery_t:-0}" = "1"; then
+    print_ok "Recovery Restart — ENABLED"
+  else
+    print_warn "Recovery Restart — DISABLED (enable after setting private server URL)"
+  fi
+  if test "${ev_t:-0}" = "1"; then
+    print_ok "Event Voter — ENABLED"
+  else
+    print_warn "Event Voter — DISABLED (enable after adding training images)"
+  fi
+}
+
+# ── Diagnose command ──────────────────────────────────────────────────────────
+
+run_diagnose() {
+  local out_file="$HOME/acc_setup_diagnose.txt"
+  printf 'Writing diagnostic file: %s\n' "$out_file"
+  printf '\n'
+
+  {
+    printf '# ACC Setup Diagnostics\n'
+    printf 'date: %s\n' "$(date)"
+    printf 'repo: %s\n' "$project_root"
+    printf 'git_commit: %s\n' "$(git -C "$project_root" log -1 --oneline 2>/dev/null || printf '<none>')"
+    printf '\n=== git status ===\n'
+    git -C "$project_root" status --short 2>/dev/null || printf '<error>\n'
+
+    printf '\n=== ~/.local/bin/acc ===\n'
+    local launcher_path="$HOME/.local/bin/acc"
+    if test -f "$launcher_path"; then
+      cat "$launcher_path"
+    else
+      printf '<not installed>\n'
+    fi
+
+    printf '\n=== bin/acc (first 15 lines) ===\n'
+    head -n15 "$project_root/bin/acc" 2>/dev/null || printf '<not found>\n'
+
+    printf '\n=== runtime_config/orchestrator/defaults.conf ===\n'
+    local orch_conf="$project_root/runtime_config/orchestrator/defaults.conf"
+    if test -f "$orch_conf"; then cat "$orch_conf"; else printf '<not found>\n'; fi
+
+    printf '\n=== runtime_config/ui/toggles.conf ===\n'
+    local ui_conf="$project_root/runtime_config/ui/toggles.conf"
+    if test -f "$ui_conf"; then cat "$ui_conf"; else printf '<not found>\n'; fi
+
+    printf '\n=== pack_opener/points.conf ===\n'
+    local po_pts="$project_root/runtime_config/pack_opener/points.conf"
+    if test -f "$po_pts"; then cat "$po_pts"; else printf '<not found>\n'; fi
+
+    printf '\n=== pack_opener/timing.conf ===\n'
+    local po_timing="$project_root/runtime_config/pack_opener/timing.conf"
+    if test -f "$po_timing"; then cat "$po_timing"; else printf '<not found>\n'; fi
+
+    printf '\n=== pack_opener/potion_plan.conf ===\n'
+    local po_plan="$project_root/runtime_config/pack_opener/potion_plan.conf"
+    if test -f "$po_plan"; then cat "$po_plan"; else printf '<not found>\n'; fi
+
+    printf '\n=== runtime_config/event_voter/defaults.conf ===\n'
+    local ev_conf="$project_root/runtime_config/event_voter/defaults.conf"
+    if test -f "$ev_conf"; then cat "$ev_conf"; else printf '<not found>\n'; fi
+
+    printf '\n=== Dependencies ===\n'
+    for cmd in bash git python3 xdotool flatpak gamescope grep sed; do
+      printf '%s: %s\n' "$cmd" "$(command -v "$cmd" 2>/dev/null || printf '<not found>')"
+    done
+
+    printf '\n=== Sober (flatpak) ===\n'
+    if command_exists flatpak; then
+      flatpak list 2>/dev/null | grep -i sober || printf '<not installed>\n'
+    else
+      printf '<flatpak not found>\n'
+    fi
+
+    printf '\n=== Running processes ===\n'
+    pgrep -la gamescope 2>/dev/null || printf 'gamescope: <none>\n'
+    pgrep -la sober 2>/dev/null || printf 'sober: <none>\n'
+
+    printf '\n=== Display environment ===\n'
+    printf 'DISPLAY=%s\n' "${DISPLAY:-<not set>}"
+    printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY:-<not set>}"
+
+    printf '\n=== xdotool DISPLAY=:1 getmouselocation ===\n'
+    if command_exists xdotool; then
+      DISPLAY=:1 xdotool getmouselocation --shell 2>/dev/null || \
+        printf '<failed — Gamescope may not be running or DISPLAY=:1 is wrong>\n'
+    else
+      printf '<xdotool not found>\n'
+    fi
+
+    printf '\n=== dry-run live-cycle (1 cycle) ===\n'
+    MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+      "$project_root/bin/macroctl" dry-run live-cycle --cycles 1 2>&1 \
+      | head -n60 || printf '<error running dry-run>\n'
+
+    printf '\n=== OpenCV (python3-opencv) ===\n'
+    python3 -c "import cv2; print('cv2 version:', cv2.__version__)" 2>/dev/null || \
+      printf '<python3-opencv not available>\n'
+
+    printf '\n=== Event Voter training files ===\n'
+    local ev_train="$project_root/runtime_config/event_voter/training"
+    if test -d "$ev_train"; then
+      ls -la "$ev_train" 2>/dev/null || printf '<empty>\n'
+    else
+      printf '<directory not found: %s>\n' "$ev_train"
+    fi
+
+    printf '\n=== Latest ACC logs ===\n'
+    local log_dir="$project_root/05_debug_snapshots/logs"
+    if test -d "$log_dir"; then
+      local found_logs=0
+      while IFS= read -r f; do
+        found_logs=1
+        printf '\n--- %s ---\n' "$f"
+        tail -n20 "$f" 2>/dev/null || true
+      done < <(
+        find "$log_dir" -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null \
+          | sort -rn | head -n3 | sed 's/^[^ ]* //'
+      )
+      if test "$found_logs" = "0"; then
+        printf '<no log files found>\n'
+      fi
+    else
+      printf '<no log directory>\n'
+    fi
+
+  } > "$out_file" 2>&1
+
+  printf 'Send this file for debugging: %s\n' "$out_file"
+}
+
 # ── Private server URL ────────────────────────────────────────────────────────
 
 setup_private_server_url() {
@@ -494,33 +932,82 @@ setup_private_server_url() {
 # ── Event Voter training image info ──────────────────────────────────────────
 
 setup_event_voter_info() {
-  print_header "Event Voter — Training images"
+  print_header "Event Voter — Setup and validation"
 
   print_info "Event Voter is an experimental visual module that auto-votes in"
   print_info "Roblox in-game events. It is DISABLED by default."
   print_info ""
-  print_info "To use Event Voter, you must provide your own training screenshots."
-  print_info "The public repo does not ship private game screenshots."
-  print_info ""
-  print_info "After setup, place your training images here:"
-  print_info "  runtime_config/event_voter/training/live_event_seed.png"
-  print_info "  runtime_config/event_voter/training/live_event_seed_mutation.png"
-  print_info ""
-  print_info "These are local screenshots of the event panel in your game session."
-  print_info "See docs/EVENT_VOTER_EXPERIMENT.md for how to capture them."
+  print_info "Requirements:"
+  print_info "  - python3-opencv must be installed"
+  print_info "  - Two training screenshots must be placed in:"
+  print_info "      runtime_config/event_voter/training/live_event_seed.png"
+  print_info "      runtime_config/event_voter/training/live_event_seed_mutation.png"
+  print_info "  See docs/EVENT_VOTER_EXPERIMENT.md for how to capture them."
   print_info ""
 
   local training_dir="$RC_DIR/event_voter/training"
+  local ev_defaults="$RC_DIR/event_voter/defaults.conf"
+
   if test "$DRY_RUN" = "1"; then
     print_info "[dry-run] Would create: runtime_config/event_voter/training/"
+    print_info "[dry-run] Would check for training images and auto-disable if missing."
     return 0
   fi
 
   mkdir -p "$training_dir"
-  print_ok "runtime_config/event_voter/training/ — Created (add your screenshots here)"
-  print_info ""
-  print_info "Event Voter defaults: EVENT_VOTER_ENABLED=0 EVENT_VOTER_LIVE_ALLOWED=0"
-  print_info "Enable only after adding training images and testing with dry-run."
+
+  # Check training files
+  local has_seed=0 has_mutation=0
+  if test -f "$training_dir/live_event_seed.png"; then has_seed=1; fi
+  if test -f "$training_dir/live_event_seed_mutation.png"; then has_mutation=1; fi
+
+  if test "$has_seed" = "1" && test "$has_mutation" = "1"; then
+    print_ok "Event Voter training images — present"
+  else
+    print_warn "Event Voter training images — not yet added"
+    if test "$has_seed" = "0"; then
+      print_miss "Missing: runtime_config/event_voter/training/live_event_seed.png"
+    fi
+    if test "$has_mutation" = "0"; then
+      print_miss "Missing: runtime_config/event_voter/training/live_event_seed_mutation.png"
+    fi
+    print_info ""
+    print_info "Event Voter remains DISABLED until training images are added."
+    print_info "See docs/EVENT_VOTER_EXPERIMENT.md for capture instructions."
+  fi
+
+  # Auto-disable Event Voter if it's enabled but missing requirements.
+  if test -f "$ev_defaults"; then
+    local ev_enabled
+    ev_enabled="$(grep '^EVENT_VOTER_ENABLED=' "$ev_defaults" | tail -n1 | cut -d= -f2- || true)"
+    if test "${ev_enabled:-0}" = "1"; then
+      local needs_disable=0
+      if test "$OPENCV_AVAILABLE" != "1"; then needs_disable=1; fi
+      if test "$has_seed" = "0" || test "$has_mutation" = "0"; then needs_disable=1; fi
+      if test "$needs_disable" = "1"; then
+        local tmp_ev
+        tmp_ev="$(mktemp)"
+        grep -v '^EVENT_VOTER_ENABLED=' "$ev_defaults" \
+          | grep -v '^EVENT_VOTER_LIVE_ALLOWED=' > "$tmp_ev" || true
+        printf 'EVENT_VOTER_ENABLED=0\n' >> "$tmp_ev"
+        printf 'EVENT_VOTER_LIVE_ALLOWED=0\n' >> "$tmp_ev"
+        mv "$tmp_ev" "$ev_defaults"
+        print_warn "Event Voter was ENABLED but missing requirements — auto-disabled."
+        if test "$OPENCV_AVAILABLE" != "1"; then
+          print_info "  Missing: python3-opencv"
+          print_info "  Install: sudo apt install python3-opencv  (Pop!/Ubuntu)"
+          print_info "           sudo dnf install python3-opencv  (Fedora)"
+        fi
+        if test "$has_seed" = "0" || test "$has_mutation" = "0"; then
+          print_info "  Missing: training images (see above)"
+        fi
+        print_info "  Re-enable: edit runtime_config/event_voter/defaults.conf"
+        print_info "             or use ACC menu → Module toggles → Event Voter"
+      fi
+    fi
+  fi
+
+  print_ok "runtime_config/event_voter/training/ — ready (add your screenshots here)"
 }
 
 # ── Validation ────────────────────────────────────────────────────────────────
@@ -768,21 +1255,27 @@ show_next_steps() {
 
 show_help() {
   cat <<'EOF'
-ACC Setup — Pop!_OS setup wizard
+ACC Setup — Pop!_OS / Ubuntu setup wizard
 
 Usage:
   ./bin/setup-acc              Run the full interactive setup
   ./bin/setup-acc --check      Check system and config status (no installs, no writes)
   ./bin/setup-acc --dry-run    Print what the setup would do, without doing anything
+  ./bin/setup-acc --diagnose   Write a support diagnostics file to ~/acc_setup_diagnose.txt
   ./bin/setup-acc --help       Show this help
 
 What this setup does:
+  - Prompts you to choose a setup profile:
+      "Known-good 800x600" — recommended for new setups (calibrated pack opener,
+        safe module defaults: Pack enabled, Market/Figurines/Recovery/Event Voter off)
+      "Custom" — start blank and calibrate everything yourself
   - Checks your OS and installed programs
   - Offers to install missing programs using apt (will ask before running sudo)
   - Offers to install Sober (Roblox via Flatpak)
-  - Creates your local runtime_config/ folder
-  - Lets you choose between the 800x600 preset or a blank config
+  - Creates your local runtime_config/ folder (with a timestamped backup if one exists)
   - Optionally stores a private server URL for the recovery module
+  - Validates Event Voter requirements; auto-disables if training images are missing
+  - Installs ~/.local/bin/acc so you can run "acc" from any terminal
   - Runs non-live validation checks
 
 What this setup does NOT do:
@@ -792,15 +1285,20 @@ What this setup does NOT do:
   - Does not push or commit any files
   - Does not store your private server URL in any committed file
 
-The 800x600 preset:
+The known-good 800x600 preset / profile:
   Includes pre-filled coordinates from a working 800x600 Gamescope+Sober setup.
   Only use this preset if your Gamescope window is also 800x600 and the Roblox
   UI layout matches. If clicks miss, recalibrate using docs/CALIBRATION.md.
+  Safe startup state: Pack Opener ON. Market/Figurines/Recovery/Event Voter OFF.
+
+Diagnostics:
+  If setup fails, run:  ./bin/setup-acc --diagnose
+  Then send the file:   ~/acc_setup_diagnose.txt
 
 After setup:
   1. Start Gamescope with Sober inside it
-  2. Confirm it attached to DISPLAY=:1
-  3. Run ./bin/acc and check module status before going live
+  2. Open a new terminal and run: acc
+  3. Check module status (option 5) before going live
 
 EOF
 }
@@ -822,6 +1320,11 @@ main() {
       ;;
     --dry-run)
       DRY_RUN=1
+      ;;
+    --diagnose)
+      detect_os
+      run_diagnose
+      exit 0
       ;;
     "")
       ;;
@@ -846,13 +1349,18 @@ main() {
       print_warn "Not Pop!_OS / Ubuntu-based"
     fi
 
-    print_header "Step 2 — Required programs"
+    print_header "Step 2 — Choose setup profile"
+    print_info "[dry-run] Would ask:"
+    print_info "  1) Known-good 800x600 Sober/Gamescope (recommended)"
+    print_info "  2) Custom / manual configuration"
+
+    print_header "Step 3 — Required programs"
     check_dependencies
 
-    print_header "Step 3 — Install missing programs"
+    print_header "Step 4 — Install missing programs"
     install_dependencies
 
-    print_header "Step 4 — Sober (Roblox client)"
+    print_header "Step 5 — Sober (Roblox client)"
     if command_exists flatpak; then
       check_sober
     else
@@ -864,7 +1372,10 @@ main() {
     setup_private_server_url
     setup_event_voter_info
 
-    print_header "Step 9 — Validation"
+    print_header "Step 9 — Install acc launcher"
+    install_acc_launcher
+
+    print_header "Step 10 — Validation"
     print_info "[dry-run] Would run:"
     print_info "  bash -n bin/acc bin/pack-opener-ui bin/macroctl bin/setup-acc"
     print_info "  bash -n src/modules/*.sh src/lib/*.sh"
@@ -888,17 +1399,19 @@ main() {
   # ── Interactive mode ──────────────────────────────────────────────────────
 
   printf '\n'
-  printf '\033[1;34m┌──────────────────────────────────────┐\033[0m\n'
-  printf '\033[1;34m│          ACC Setup Wizard            │\033[0m\n'
-  printf '\033[1;34m└──────────────────────────────────────┘\033[0m\n'
+  printf '\033[1;34m┌──────────────────────────────────────────────────────┐\033[0m\n'
+  printf '\033[1;34m│          ACC Setup Wizard                            │\033[0m\n'
+  printf '\033[1;34m│  Known-good 800x600 Pop!_OS / Ubuntu profile         │\033[0m\n'
+  printf '\033[1;34m└──────────────────────────────────────────────────────┘\033[0m\n'
   printf '\n'
-  printf 'This wizard sets up ACC on your Pop!_OS machine.\n'
+  printf 'This wizard sets up ACC for use with Sober + Gamescope 800x600.\n'
   printf '\n'
   printf 'What this does:\n'
-  printf '  - Checks your system and installed programs\n'
-  printf '  - Installs missing programs (will ask before running sudo)\n'
-  printf '  - Sets up your local config folder\n'
-  printf '  - Runs non-live checks to confirm everything looks right\n'
+  printf '  1. Asks which setup profile to use (known-good or custom)\n'
+  printf '  2. Checks your system and installs missing programs\n'
+  printf '  3. Sets up your local config folder from the chosen profile\n'
+  printf '  4. Installs the "acc" terminal command\n'
+  printf '  5. Runs non-live validation checks\n'
   printf '\n'
   printf 'What this does NOT do:\n'
   printf '  - Does not run the live macro\n'
@@ -928,17 +1441,20 @@ main() {
     fi
   fi
 
-  # Step 2 — Dependency check
-  print_header "Step 2 — Checking required programs"
+  # Step 2 — Choose setup profile
+  choose_setup_profile
+
+  # Step 3 — Dependency check
+  print_header "Step 3 — Checking required programs"
   check_dependencies
 
-  # Step 3 — Install missing deps (if any)
+  # Step 4 — Install missing deps (if any)
   if test "${#DEPS_MISSING[@]}" -gt 0; then
     install_dependencies
   fi
 
-  # Step 4 — Sober
-  print_header "Step 4 — Checking Sober (Roblox client)"
+  # Step 5 — Sober
+  print_header "Step 5 — Checking Sober (Roblox client)"
   if command_exists flatpak; then
     check_sober
     if test "$SOBER_INSTALLED" = "0"; then
@@ -951,20 +1467,27 @@ main() {
     print_info "  flatpak install flathub org.vinegarhq.Sober"
   fi
 
-  # Step 5-6 — Runtime config
-  setup_runtime_config
+  # Step 6 — Runtime config (path depends on profile)
+  if test "$PROFILE_SELECTED" = "known_good_800x600"; then
+    setup_runtime_config_known_good
+  else
+    setup_runtime_config
+  fi
 
   # Step 7 — Private server URL
   setup_private_server_url
 
-  # Step 8 — Event Voter training info
+  # Step 8 — Event Voter training info and validation
   setup_event_voter_info
 
-  # Step 9 — Validation
+  # Step 9 — Install acc launcher
+  install_acc_launcher
+
+  # Step 10 — Validation
   run_validation
 
   # Done
-  show_next_steps
+  show_final_summary
 }
 
 main "$@"

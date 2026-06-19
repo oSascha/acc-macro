@@ -21,16 +21,19 @@ pack-opening cycles, optional shop/market buying, figurines buying, and more.
 ## Quick Start
 
 ```bash
-git clone https://github.com/oSascha/acc-macro.git
-cd acc-macro
+git clone <repo-url> acc
+cd acc
 chmod +x bin/setup-acc
 ./bin/setup-acc
 ```
 
-Once set up:
+When prompted, choose **1) Known-good 800x600 Sober/Gamescope** (the default).
+The wizard installs everything and sets up the `acc` command.
+
+Once set up, **open a new terminal** and run:
 
 ```bash
-./bin/acc        # or just: acc  (if installed via bin/install-acc-launcher)
+acc
 ```
 
 ### Setup wizard flags
@@ -39,12 +42,17 @@ Once set up:
 ./bin/setup-acc           # Full interactive setup
 ./bin/setup-acc --check   # Check system and config status only (no writes)
 ./bin/setup-acc --dry-run # Print what the setup would do, without doing it
+./bin/setup-acc --diagnose # Write ~/acc_setup_diagnose.txt for support
 ./bin/setup-acc --help    # Show help
 ```
 
 The wizard checks your system, installs dependencies via `apt`, sets up your local
-`runtime_config/` folder, lets you choose the 800x600 preset, and runs non-live
-validation. **It does not run the live macro.**
+`runtime_config/` folder with the 800x600 preset, installs the `acc` terminal command,
+and runs non-live validation. **It does not run the live macro.**
+
+**Safe startup state** after setup: Pack Opener enabled. Market Buyer, Figurines Buyer,
+Recovery Restart, and Event Voter all disabled. Enable them one at a time from the
+ACC menu → Module Toggles after confirming each module is calibrated and ready.
 
 ## Tested Environment
 

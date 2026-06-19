@@ -1,5 +1,56 @@
 # ACC Changelog
 
+## 2026-06-19 — Known-good setup wizard profile and persistent module toggles
+
+### Setup wizard (`bin/setup-acc`)
+
+- **First-class known-good 800x600 profile**: The setup wizard now offers a
+  "Known-good 800x600 Sober/Gamescope" option near the beginning. This option
+  copies the full 800x600 preset into `runtime_config/` with a timestamped backup,
+  sets safe module defaults (Pack Opener ON; Market/Figurines/Recovery/Event Voter OFF),
+  and installs the `acc` terminal command.
+- **Launcher installation step**: The wizard now installs `~/.local/bin/acc` as a
+  wrapper that `cd`s to the repo and exports the required live env gates before
+  exec'ing `./bin/acc`. This makes `acc` work from any terminal after setup.
+  PATH is updated in `~/.bashrc` / `~/.zshrc` if `~/.local/bin` is not already present.
+- **`--diagnose` flag**: `./bin/setup-acc --diagnose` writes a full support file to
+  `~/acc_setup_diagnose.txt` including git state, launcher content, all runtime_config
+  values, dependency paths, process checks, xdotool result, dry-run output, and latest
+  logs. Final message: "Send this file for debugging: ~/acc_setup_diagnose.txt"
+- **Event Voter auto-disable**: If Event Voter is found enabled but `python3-opencv`
+  is not installed or training images are missing, the wizard auto-disables it and
+  explains why with exact repair instructions.
+- **Improved final summary**: Setup ends with a complete status summary — dependencies,
+  config status, module toggle state, Event Voter status, installed command path, and
+  the exact next command to run.
+- **Numbered steps and plain-English messages** throughout the wizard.
+
+### Module toggles (`bin/pack-opener-ui`)
+
+- **Persistent module toggles**: The UI no longer uses hardcoded session defaults.
+  On startup, `load_ui_toggles()` reads `runtime_config/ui/toggles.conf` (preferred)
+  or falls back to `runtime_config/orchestrator/defaults.conf` plus module-specific
+  configs. When the user changes a toggle, `save_ui_toggles()` writes the new state
+  to `runtime_config/ui/toggles.conf` immediately.
+- **Safe startup defaults**: The code-level defaults for Market Buyer and Figurines
+  Buyer changed from `1` to `0` so that a fresh install without any config file shows
+  the correct safe state.
+
+### Preset (`presets/800x600_known_good/`)
+
+- **`orchestrator/defaults.conf`**: `MARKET_BUYER_ENABLED=0` and
+  `FIGURINES_BUYER_ENABLED=0` — safe startup state for new users.
+- **`ui/toggles.conf`** (new): Pre-set UI toggle file so toggle state is correct from
+  first run without requiring any user interaction in the toggle screen.
+
+### Tests (`tests/dry_runs/setup_acc_dry_run.sh`)
+
+- Added tests for: known-good profile option, launcher installation function,
+  `--diagnose` flag, diagnose output file name, final summary function, new preset
+  `ui/toggles.conf`, orchestrator preset safe defaults, pack-opener-ui toggle
+  load/save functions, no hardcoded home paths in committed files, and
+  `--dry-run` output mentioning the launcher step.
+
 ## 2026-06-19 — Set default placement click burst delay to 8ms
 
 - **`PLACE_LIVE_CLICK_BURST_DELAY=8ms`**: Inter-click delay within each placement click burst

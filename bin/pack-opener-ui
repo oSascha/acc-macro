@@ -69,11 +69,11 @@ ACC_STOP_REQUESTED=0
 _acc_full_macro_orch_pid=""
 _full_macro_start_epoch=0
 
-# Session-state module toggles (1 = enabled, 0 = disabled)
-# Changed in module_toggles_loop(); passed as env vars to orchestrator.
+# Session-state module toggles — loaded from config at startup, saved on change.
+# Defaults below are used only when no config file exists yet.
 TOGGLE_PACK_OPENER=1
-TOGGLE_MARKET_BUYER=1
-TOGGLE_FIGURINES_BUYER=1
+TOGGLE_MARKET_BUYER=0
+TOGGLE_FIGURINES_BUYER=0
 TOGGLE_STAR_TRIALS=0
 TOGGLE_RECOVERY_RESTART=0
 TOGGLE_EVENT_VOTER=0
@@ -86,6 +86,8 @@ RECOVERY_POINTS_FILE_UI="$RECOVERY_RUNTIME_DIR/points.conf"
 EVENT_VOTER_DEFAULTS_FILE="$PROJECT_ROOT/runtime_config/event_voter/defaults.conf"
 
 SOBER_LAUNCHER_DEFAULTS_FILE="$PROJECT_ROOT/runtime_config/sober_launcher/defaults.conf"
+
+UI_TOGGLES_FILE="$PROJECT_ROOT/runtime_config/ui/toggles.conf"
 
 # shellcheck source=../src/modules/sober_launcher.sh
 . "$PROJECT_ROOT/src/modules/sober_launcher.sh"
@@ -213,6 +215,71 @@ event_voter_status_label() {
   else
     printf '%s[READY        ]%s Event Voter\n' "$CYAN" "$RESET"
   fi
+}
+
+# Load persisted module toggles from runtime_config.
+# Priority: ui/toggles.conf → orchestrator/defaults.conf + module defaults.
+load_ui_toggles() {
+  local ui_file="$UI_TOGGLES_FILE"
+
+  if test -f "$ui_file"; then
+    local k v
+    while IFS='=' read -r k v; do
+      case "$k" in
+        '#'*|'') continue ;;
+        TOGGLE_PACK_OPENER)      TOGGLE_PACK_OPENER="${v:-1}" ;;
+        TOGGLE_MARKET_BUYER)     TOGGLE_MARKET_BUYER="${v:-0}" ;;
+        TOGGLE_FIGURINES_BUYER)  TOGGLE_FIGURINES_BUYER="${v:-0}" ;;
+        TOGGLE_RECOVERY_RESTART) TOGGLE_RECOVERY_RESTART="${v:-0}" ;;
+        TOGGLE_EVENT_VOTER)      TOGGLE_EVENT_VOTER="${v:-0}" ;;
+      esac
+    done < "$ui_file" 2>/dev/null || true
+    return 0
+  fi
+
+  # Fall back to orchestrator defaults for pack/market/figurines toggles.
+  local orch_defaults="$PROJECT_ROOT/runtime_config/orchestrator/defaults.conf"
+  if test -f "$orch_defaults"; then
+    local k v
+    while IFS='=' read -r k v; do
+      case "$k" in
+        '#'*|'') continue ;;
+        PACK_OPENER_ENABLED)     TOGGLE_PACK_OPENER="${v:-1}" ;;
+        MARKET_BUYER_ENABLED)    TOGGLE_MARKET_BUYER="${v:-0}" ;;
+        FIGURINES_BUYER_ENABLED) TOGGLE_FIGURINES_BUYER="${v:-0}" ;;
+      esac
+    done < "$orch_defaults" 2>/dev/null || true
+  fi
+
+  # Recovery toggle from recovery defaults.
+  local rec_defaults="$PROJECT_ROOT/runtime_config/recovery/defaults.conf"
+  if test -f "$rec_defaults"; then
+    local rec_enabled
+    rec_enabled="$(grep '^RECOVERY_ENABLED=' "$rec_defaults" | tail -n1 | cut -d= -f2- || true)"
+    TOGGLE_RECOVERY_RESTART="${rec_enabled:-0}"
+  fi
+
+  # Event Voter toggle from event_voter defaults.
+  local ev_defaults="$PROJECT_ROOT/runtime_config/event_voter/defaults.conf"
+  if test -f "$ev_defaults"; then
+    local ev_enabled
+    ev_enabled="$(grep '^EVENT_VOTER_ENABLED=' "$ev_defaults" | tail -n1 | cut -d= -f2- || true)"
+    TOGGLE_EVENT_VOTER="${ev_enabled:-0}"
+  fi
+}
+
+# Persist current module toggles to runtime_config/ui/toggles.conf.
+save_ui_toggles() {
+  local ui_dir="${UI_TOGGLES_FILE%/*}"
+  mkdir -p "$ui_dir" 2>/dev/null || true
+  {
+    printf '# ACC UI module toggles — saved by pack-opener-ui\n'
+    printf 'TOGGLE_PACK_OPENER=%s\n'      "$TOGGLE_PACK_OPENER"
+    printf 'TOGGLE_MARKET_BUYER=%s\n'     "$TOGGLE_MARKET_BUYER"
+    printf 'TOGGLE_FIGURINES_BUYER=%s\n'  "$TOGGLE_FIGURINES_BUYER"
+    printf 'TOGGLE_RECOVERY_RESTART=%s\n' "$TOGGLE_RECOVERY_RESTART"
+    printf 'TOGGLE_EVENT_VOTER=%s\n'      "$TOGGLE_EVENT_VOTER"
+  } > "$UI_TOGGLES_FILE" 2>/dev/null || true
 }
 
 clear_screen() {
@@ -1505,6 +1572,7 @@ module_toggles_loop() {
         else
           TOGGLE_PACK_OPENER=1
         fi
+        save_ui_toggles
         ;;
       2)
         if test "$TOGGLE_MARKET_BUYER" = "1"; then
@@ -1512,6 +1580,7 @@ module_toggles_loop() {
         else
           TOGGLE_MARKET_BUYER=1
         fi
+        save_ui_toggles
         ;;
       3)
         if test "$TOGGLE_FIGURINES_BUYER" = "1"; then
@@ -1519,6 +1588,7 @@ module_toggles_loop() {
         else
           TOGGLE_FIGURINES_BUYER=1
         fi
+        save_ui_toggles
         ;;
       4)
         if test "$TOGGLE_RECOVERY_RESTART" = "1"; then
@@ -1526,6 +1596,7 @@ module_toggles_loop() {
         else
           TOGGLE_RECOVERY_RESTART=1
         fi
+        save_ui_toggles
         ;;
       5)
         if test "$TOGGLE_EVENT_VOTER" = "1"; then
@@ -1533,6 +1604,7 @@ module_toggles_loop() {
         else
           TOGGLE_EVENT_VOTER=1
         fi
+        save_ui_toggles
         ;;
       b|B)
         return
@@ -1884,12 +1956,14 @@ case "${1:-}" in
       usage
       exit 2
     fi
+    load_ui_toggles
     interactive_loop
     ;;
   --help|-h)
     usage
     ;;
   --status)
+    load_ui_toggles
     print_status_screen
     ;;
   --dry-run-cycles)

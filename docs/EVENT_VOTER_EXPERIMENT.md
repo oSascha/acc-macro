@@ -2,6 +2,18 @@
 
 > **EXPERIMENTAL.** This module uses computer vision to vote at ACC Live Events. It may click the wrong option. Enable at your own risk.
 
+> **Disabled by default.** The setup wizard auto-disables Event Voter if `python3-opencv`
+> is not installed or if training images are missing. It will never block the full macro
+> from running — all failures are logged and pack opening continues.
+
+## Quick setup checklist
+
+1. Run `./bin/setup-acc` and choose the known-good 800x600 profile
+2. Install OpenCV: `sudo apt install python3-opencv`
+3. Capture training screenshots (see below)
+4. Run live diagnostics to verify: `./bin/macroctl dry-run event-voter-live-diagnostics`
+5. Enable in ACC menu → Module Toggles → Event Voter
+
 ## Event schedule (Amsterdam / CEST)
 
 ```

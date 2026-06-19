@@ -32,6 +32,13 @@ Example of what a private URL looks like (do not commit):
 RECOVERY_PRIVATE_SERVER_URL='https://www.roblox.com/share?code=XXXXXXXX&type=Server'
 ```
 
+## Diagnostic File
+
+Running `./bin/setup-acc --diagnose` writes `~/acc_setup_diagnose.txt`. This file
+contains config values, dependency paths, and dry-run output. **It does not
+contain private server URLs** (those are redacted in the diagnostic). Review it
+before sharing to confirm no sensitive paths or tokens appear.
+
 ## Before Pushing a Fork
 
 Run these checks before `git push`:

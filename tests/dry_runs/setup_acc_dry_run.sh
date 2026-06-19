@@ -234,4 +234,99 @@ if test "$malformed_ok" = "1"; then
   pass "no malformed/truncated keys found in preset or template files"
 fi
 
+# ── Test: setup-acc has known-good profile prompt ────────────────────────────
+assert_contains "$setup_src" "Known-good 800x600" "setup-acc source (known-good profile option)"
+assert_contains "$setup_src" "choose_setup_profile" "setup-acc source (choose_setup_profile function)"
+assert_contains "$setup_src" "PROFILE_SELECTED" "setup-acc source (PROFILE_SELECTED variable)"
+
+# ── Test: setup-acc has launcher installation ─────────────────────────────────
+assert_contains "$setup_src" "install_acc_launcher" "setup-acc source (install_acc_launcher function)"
+assert_contains "$setup_src" "MACRO_INPUT_MODE=live" "setup-acc source (launcher env gate MACRO_INPUT_MODE)"
+assert_contains "$setup_src" "MACRO_LIVE_INPUT_ALLOWED=1" "setup-acc source (launcher env gate MACRO_LIVE_INPUT_ALLOWED)"
+assert_contains "$setup_src" "MACRO_LIVE_CYCLE_RUNNER_CONFIRM=YES" "setup-acc source (launcher env gate MACRO_LIVE_CYCLE_RUNNER_CONFIRM)"
+
+# ── Test: launcher is not recursive (does not point to ~/.local/bin/acc) ──────
+if grep -qF '~/.local/bin/acc' "$setup_acc" 2>/dev/null; then
+  # Acceptable to mention the path, but it must not be used as exec target
+  if grep -qE "exec.*\.local/bin/acc" "$setup_acc" 2>/dev/null; then
+    fail "setup-acc installs a recursive launcher (exec ~/.local/bin/acc)"
+  else
+    pass "setup-acc launcher is not recursive (path mentioned but not exec'd)"
+  fi
+else
+  pass "setup-acc launcher is not recursive"
+fi
+
+# ── Test: setup-acc has --diagnose flag ───────────────────────────────────────
+assert_contains "$setup_src" "--diagnose" "setup-acc source (--diagnose flag)"
+assert_contains "$setup_src" "run_diagnose" "setup-acc source (run_diagnose function)"
+assert_contains "$setup_src" "acc_setup_diagnose.txt" "setup-acc source (diagnose output file)"
+assert_contains "$setup_src" "Send this file for debugging" "setup-acc source (diagnose message)"
+
+# ── Test: --diagnose flag exits 0 ────────────────────────────────────────────
+if "$setup_acc" --diagnose >/dev/null 2>&1; then
+  pass "--diagnose exits 0"
+else
+  fail "--diagnose exited non-zero"
+fi
+
+# ── Test: setup-acc has final summary function ───────────────────────────────
+assert_contains "$setup_src" "show_final_summary" "setup-acc source (show_final_summary function)"
+
+# ── Test: new preset file ui/toggles.conf exists ─────────────────────────────
+if test -f "$preset_dir/ui/toggles.conf"; then
+  pass "preset file exists: ui/toggles.conf"
+else
+  fail "preset file missing: presets/800x600_known_good/ui/toggles.conf"
+fi
+
+# ── Test: ui/toggles.conf has Pack Opener enabled and others disabled ─────────
+ui_toggles_file="$preset_dir/ui/toggles.conf"
+if test -f "$ui_toggles_file"; then
+  ui_toggles_content="$(cat "$ui_toggles_file")"
+  assert_contains "$ui_toggles_content" "TOGGLE_PACK_OPENER=1" "ui/toggles.conf Pack Opener enabled"
+  assert_contains "$ui_toggles_content" "TOGGLE_MARKET_BUYER=0" "ui/toggles.conf Market Buyer disabled"
+  assert_contains "$ui_toggles_content" "TOGGLE_FIGURINES_BUYER=0" "ui/toggles.conf Figurines Buyer disabled"
+  assert_contains "$ui_toggles_content" "TOGGLE_RECOVERY_RESTART=0" "ui/toggles.conf Recovery disabled"
+  assert_contains "$ui_toggles_content" "TOGGLE_EVENT_VOTER=0" "ui/toggles.conf Event Voter disabled"
+fi
+
+# ── Test: orchestrator preset has safe defaults (market/figurines disabled) ──
+orch_preset="$preset_dir/orchestrator/defaults.conf"
+if test -f "$orch_preset"; then
+  orch_preset_content="$(cat "$orch_preset")"
+  assert_contains "$orch_preset_content" "PACK_OPENER_ENABLED=1" "orchestrator preset Pack Opener enabled"
+  assert_contains "$orch_preset_content" "MARKET_BUYER_ENABLED=0" "orchestrator preset Market Buyer disabled"
+  assert_contains "$orch_preset_content" "FIGURINES_BUYER_ENABLED=0" "orchestrator preset Figurines Buyer disabled"
+fi
+
+# ── Test: pack-opener-ui has toggle load/save functions ──────────────────────
+ui_src="$(cat "$project_root/bin/pack-opener-ui")"
+assert_contains "$ui_src" "load_ui_toggles" "pack-opener-ui source (load_ui_toggles function)"
+assert_contains "$ui_src" "save_ui_toggles" "pack-opener-ui source (save_ui_toggles function)"
+assert_contains "$ui_src" "UI_TOGGLES_FILE" "pack-opener-ui source (UI_TOGGLES_FILE variable)"
+
+# ── Test: pack-opener-ui syntax is valid ─────────────────────────────────────
+if bash -n "$project_root/bin/pack-opener-ui" 2>&1; then
+  pass "bin/pack-opener-ui passes bash -n syntax check"
+else
+  fail "bin/pack-opener-ui failed bash -n syntax check"
+fi
+
+# ── Test: pack-opener-ui default toggles are safe (market/figurines off) ─────
+assert_contains "$ui_src" "TOGGLE_MARKET_BUYER=0" "pack-opener-ui source (Market Buyer safe default off)"
+assert_contains "$ui_src" "TOGGLE_FIGURINES_BUYER=0" "pack-opener-ui source (Figurines Buyer safe default off)"
+
+# ── Test: no real usernames appear in committed preset/template/source files ──
+if grep -rqE '/home/[a-z][a-z0-9_-]+' \
+     "$preset_dir" "$project_root/config_templates" \
+     "$project_root/bin" "$project_root/src" 2>/dev/null; then
+  fail "committed files contain hardcoded home paths"
+else
+  pass "no hardcoded home paths in committed files"
+fi
+
+# ── Test: --dry-run mentions launcher installation step ──────────────────────
+assert_contains "$dry_out" "launcher" "--dry-run output mentions launcher step"
+
 printf '\nAll setup-acc dry-run tests passed.\n'
