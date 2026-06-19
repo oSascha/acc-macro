@@ -35,6 +35,25 @@ acc
 > Recovery Restart, and Event Voter are all disabled. Enable them one at a time
 > from the ACC menu → Module Toggles → after confirming each works.
 
+## Non-interactive / scripted install
+
+For testing, CI, or support walkthroughs where you want a fully automated setup:
+
+```bash
+./bin/setup-acc --profile known-good-800x600 --yes --no-install-deps --skip-private-server
+```
+
+This runs silently (no prompts), applies the 800x600 preset to `runtime_config/`, and
+installs `~/.local/bin/acc`. All three validation steps (validate-config, dry-run
+live-cycle) pass after this command on a clean clone.
+
+You can also override `HOME` for test isolation:
+
+```bash
+HOME=/tmp/acc-test-home ./bin/setup-acc --profile known-good-800x600 --yes --no-install-deps --skip-private-server
+# Launcher appears at: /tmp/acc-test-home/.local/bin/acc
+```
+
 ## Install Dependencies Manually
 
 Pop!_OS uses `apt`, not `dnf`:

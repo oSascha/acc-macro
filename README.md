@@ -46,6 +46,16 @@ acc
 ./bin/setup-acc --help    # Show help
 ```
 
+**Non-interactive mode** (for testing and scripted installs):
+
+```bash
+./bin/setup-acc --profile known-good-800x600 --yes --no-install-deps --skip-private-server
+```
+
+This applies the 800x600 preset to `runtime_config/`, installs the `acc` launcher
+under `$HOME/.local/bin/acc`, and runs validation — all without prompts.
+Safe to use with a temporary `HOME` for testing.
+
 The wizard checks your system, installs dependencies via `apt`, sets up your local
 `runtime_config/` folder with the 800x600 preset, installs the `acc` terminal command,
 and runs non-live validation. **It does not run the live macro.**

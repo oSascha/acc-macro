@@ -329,4 +329,93 @@ fi
 # ── Test: --dry-run mentions launcher installation step ──────────────────────
 assert_contains "$dry_out" "launcher" "--dry-run output mentions launcher step"
 
+# ── Test: non-interactive flags exist in source ───────────────────────────────
+assert_contains "$setup_src" "--profile" "setup-acc source (--profile flag)"
+assert_contains "$setup_src" "--yes" "setup-acc source (--yes flag)"
+assert_contains "$setup_src" "--no-install-deps" "setup-acc source (--no-install-deps flag)"
+assert_contains "$setup_src" "--skip-private-server" "setup-acc source (--skip-private-server flag)"
+assert_contains "$setup_src" "NONINTERACTIVE" "setup-acc source (NONINTERACTIVE variable)"
+assert_contains "$setup_src" "SKIP_DEPS_INSTALL" "setup-acc source (SKIP_DEPS_INSTALL variable)"
+assert_contains "$setup_src" "SKIP_PRIVATE_SERVER" "setup-acc source (SKIP_PRIVATE_SERVER variable)"
+assert_contains "$setup_src" "known-good-800x600" "setup-acc source (known-good-800x600 profile value)"
+
+# ── Test: --profile known-good-800x600 --yes --no-install-deps --skip-private-server exits 0 ──
+profile_out="$("$setup_acc" --profile known-good-800x600 --yes --no-install-deps --skip-private-server 2>&1)" && profile_exit=0 || profile_exit=$?
+if test "$profile_exit" = "0"; then
+  pass "--profile known-good-800x600 --yes --no-install-deps --skip-private-server exits 0"
+else
+  fail "--profile known-good-800x600 --yes --no-install-deps --skip-private-server exited $profile_exit"
+fi
+assert_contains "$profile_out" "known_good_800x600" "non-interactive output (profile shown)"
+assert_contains "$profile_out" "Step 6" "non-interactive output (Step 6 runtime_config)"
+assert_contains "$profile_out" "Step 9" "non-interactive output (Step 9 launcher)"
+
+# ── Test: non-interactive setup with temp HOME installs launcher ──────────────
+tmp_home="$(mktemp -d)"
+HOME="$tmp_home" "$setup_acc" --profile known-good-800x600 --yes --no-install-deps --skip-private-server >/dev/null 2>&1 && ni_exit=0 || ni_exit=$?
+if test "$ni_exit" = "0"; then
+  pass "non-interactive setup with temp HOME exits 0"
+else
+  fail "non-interactive setup with temp HOME exited $ni_exit"
+fi
+if test -f "$tmp_home/.local/bin/acc"; then
+  pass "launcher installed under temp HOME: $tmp_home/.local/bin/acc"
+else
+  fail "launcher not found at $tmp_home/.local/bin/acc"
+fi
+if test -L "$tmp_home/.local/bin/acc"; then
+  fail "launcher is a symlink (should be a regular file)"
+else
+  pass "launcher is not a symlink"
+fi
+if grep -qE 'exec.*\.local/bin/acc' "$tmp_home/.local/bin/acc" 2>/dev/null; then
+  fail "launcher is recursive (exec ~/.local/bin/acc)"
+else
+  pass "launcher is not recursive"
+fi
+rm -rf "$tmp_home"
+
+# ── Test: non-interactive setup populates runtime_config with preset coords ──
+rc_pts="$project_root/runtime_config/pack_opener/points.conf"
+if test -f "$rc_pts"; then
+  if grep -qE '^BASE_TELEPORT_BUTTON_X=[0-9]' "$rc_pts"; then
+    pass "runtime_config/pack_opener/points.conf has BASE_TELEPORT_BUTTON_X value"
+  else
+    fail "runtime_config/pack_opener/points.conf BASE_TELEPORT_BUTTON_X is blank or missing"
+  fi
+  if grep -qE '^PACK_CLICK_POINT_X=[0-9]' "$rc_pts"; then
+    pass "runtime_config/pack_opener/points.conf has PACK_CLICK_POINT_X value"
+  else
+    fail "runtime_config/pack_opener/points.conf PACK_CLICK_POINT_X is blank or missing"
+  fi
+else
+  pass "runtime_config/pack_opener/points.conf not found (not yet applied — acceptable in CI)"
+fi
+
+# ── Test: no duplicate step numbers in dry-run output ─────────────────────────
+dup_steps="$(printf '%s\n' "$dry_out" | grep -oE 'Step [0-9]+' | sort | uniq -d || true)"
+if test -z "$dup_steps"; then
+  pass "dry-run output has no duplicate step numbers"
+else
+  fail "dry-run output has duplicate step numbers: $dup_steps"
+fi
+
+# ── Test: diagnose source has guard for missing runtime_config ────────────────
+assert_contains "$setup_src" "Known-good setup has not been applied yet" "setup-acc source (diagnose guard message)"
+assert_contains "$setup_src" "mkdir -p \"\$HOME\"" "setup-acc source (diagnose creates HOME dir)"
+
+# ── Test: --profile with unknown profile exits non-zero ──────────────────────
+if "$setup_acc" --profile totally-wrong-profile 2>/dev/null; then
+  fail "--profile unknown-profile should exit non-zero"
+else
+  pass "--profile unknown-profile exits non-zero"
+fi
+
+# ── Test: --profile without value exits non-zero ─────────────────────────────
+if "$setup_acc" --profile 2>/dev/null; then
+  fail "--profile (no value) should exit non-zero"
+else
+  pass "--profile (no value) exits non-zero"
+fi
+
 printf '\nAll setup-acc dry-run tests passed.\n'

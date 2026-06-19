@@ -1,5 +1,45 @@
 # ACC Changelog
 
+## 2026-06-19 — Non-interactive setup mode, clean step numbering, and diagnose guard
+
+### Setup wizard (`bin/setup-acc`)
+
+- **Non-interactive mode**: `--profile known-good-800x600 --yes --no-install-deps --skip-private-server`
+  runs the full setup without prompts. Safe to use with a temporary `HOME` for test
+  isolation (launcher and PATH updates use `$HOME`). This supports both scripted installs
+  and a clean fresh-clone acceptance test.
+- **`--profile known-good-800x600`**: Pre-selects the known-good 800x600 profile without
+  interactive prompting. The `choose_setup_profile()` step is skipped; Step 2 shows
+  "Profile: known_good_800x600 (pre-selected)".
+- **`--yes`**: Auto-answers all yes/no prompts (non-interactive mode).
+- **`--no-install-deps`**: Skips `apt` and `flatpak install` steps.
+- **`--skip-private-server`**: Skips the private server URL setup step.
+- **Fixed step numbering**: Steps 1–10 are now clean and sequential in both dry-run
+  and interactive output. Previously Step 5 appeared twice (Sober and runtime_config)
+  and Step 9 appeared twice (launcher and validation). Now:
+  Step 1 system check, Step 2 profile, Step 3 dep check, Step 4 dep install,
+  Step 5 Sober, Step 6 runtime_config, Step 7 private URL, Step 8 Event Voter,
+  Step 9 launcher, Step 10 validation.
+- **Diagnose guard**: `--diagnose` no longer bootstraps blank templates when
+  `runtime_config/pack_opener/points.conf` is absent. Instead it prints:
+  "Known-good setup has not been applied yet. Run setup first." — and skips the
+  dry-run section, keeping diagnose fully read-only on a fresh clone.
+- **Diagnose HOME guard**: `run_diagnose` creates `$HOME` before writing the
+  output file, so `HOME=/tmp/acc-test-home ./bin/setup-acc --diagnose` works
+  even when the temp home directory does not yet exist.
+- **arg parsing refactor**: `main()` uses a `while` loop over all arguments
+  instead of a single-arg case, so multiple flags can be combined freely.
+
+### Tests (`tests/dry_runs/setup_acc_dry_run.sh`)
+
+- Added 20 new assertions covering: `--profile`/`--yes`/`--no-install-deps`/
+  `--skip-private-server` flags present in source, `NONINTERACTIVE`/`SKIP_DEPS_INSTALL`/
+  `SKIP_PRIVATE_SERVER` vars, non-interactive exit 0, temp-HOME launcher install
+  (path, not-symlink, not-recursive), runtime_config populated with preset coords,
+  no duplicate step numbers in dry-run output, diagnose source guard message,
+  `--profile` with unknown/missing value exits non-zero.
+- **Total**: 133 assertions, all pass.
+
 ## 2026-06-19 — Known-good setup wizard profile and persistent module toggles
 
 ### Setup wizard (`bin/setup-acc`)

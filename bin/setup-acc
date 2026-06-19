@@ -23,6 +23,9 @@ DEPS_MISSING=()
 SOBER_INSTALLED=0
 PROFILE_SELECTED=""
 LAUNCHER_INSTALLED=0
+NONINTERACTIVE=0
+SKIP_DEPS_INSTALL=0
+SKIP_PRIVATE_SERVER=0
 
 RC_DIR="$project_root/runtime_config"
 
@@ -52,6 +55,10 @@ ask_yes_no() {
   local prompt="$1"
   local default="${2:-y}"
   local answer
+  if test "$NONINTERACTIVE" = "1"; then
+    printf '%s [auto: yes]\n' "$prompt"
+    return 0
+  fi
   while true; do
     if test "$default" = "y"; then
       printf '%s [Y/n]: ' "$prompt"
@@ -154,12 +161,18 @@ install_dependencies() {
     return 0
   fi
 
-  print_header "Step 3 — Install missing programs"
+  print_header "Step 4 — Install missing programs"
 
   if test "$DRY_RUN" = "1"; then
     print_info "[dry-run] Would offer to run:"
     print_info "  sudo apt update"
     print_info "  sudo apt install -y bash coreutils git grep sed gawk python3 python3-opencv xdotool xdg-utils flatpak gamescope wl-clipboard"
+    return 0
+  fi
+
+  if test "$SKIP_DEPS_INSTALL" = "1"; then
+    print_warn "Dependency install skipped (--no-install-deps)."
+    print_info "Install manually before running live: ${DEPS_MISSING[*]}"
     return 0
   fi
 
@@ -211,6 +224,11 @@ install_sober() {
     return 0
   fi
 
+  if test "$SKIP_DEPS_INSTALL" = "1"; then
+    print_warn "Sober install skipped (--no-install-deps)."
+    return 0
+  fi
+
   print_info "Sober is the Roblox client that runs on Linux via Flatpak."
   print_info "This will run:"
   print_info "  flatpak install -y flathub org.vinegarhq.Sober"
@@ -229,7 +247,7 @@ install_sober() {
 # ── Runtime config setup ──────────────────────────────────────────────────────
 
 setup_runtime_config() {
-  print_header "Step 5 — Set up your local config folder (runtime_config/)"
+  print_header "Step 6 — Set up your local config folder (runtime_config/)"
 
   print_info "ACC stores your personal settings in runtime_config/."
   print_info "This folder is gitignored — it stays private on your computer."
@@ -289,8 +307,6 @@ _backup_runtime_config() {
 }
 
 _apply_config_choice() {
-  print_header "Step 6 — Choose a starting config"
-
   printf '\n'
   printf '         Which starting config do you want?\n\n'
   printf '         1) Use the included 800x600 preset\n'
@@ -731,6 +747,7 @@ _report_toggle_status_from_config() {
 
 run_diagnose() {
   local out_file="$HOME/acc_setup_diagnose.txt"
+  mkdir -p "$HOME" 2>/dev/null || true
   printf 'Writing diagnostic file: %s\n' "$out_file"
   printf '\n'
 
@@ -806,9 +823,15 @@ run_diagnose() {
     fi
 
     printf '\n=== dry-run live-cycle (1 cycle) ===\n'
-    MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
-      "$project_root/bin/macroctl" dry-run live-cycle --cycles 1 2>&1 \
-      | head -n60 || printf '<error running dry-run>\n'
+    local _diag_pts="$project_root/runtime_config/pack_opener/points.conf"
+    if ! test -f "$_diag_pts"; then
+      printf 'Known-good setup has not been applied yet.\n'
+      printf 'Run first: ./bin/setup-acc --profile known-good-800x600 --yes --no-install-deps --skip-private-server\n'
+    else
+      MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+        "$project_root/bin/macroctl" dry-run live-cycle --cycles 1 2>&1 \
+        | head -n60 || printf '<error running dry-run>\n'
+    fi
 
     printf '\n=== OpenCV (python3-opencv) ===\n'
     python3 -c "import cv2; print('cv2 version:', cv2.__version__)" 2>/dev/null || \
@@ -867,6 +890,11 @@ setup_private_server_url() {
     print_info "[dry-run]   runtime_config/recovery/defaults.conf"
     print_info "[dry-run]   runtime_config/sober_launcher/defaults.conf"
     print_info "[dry-run] The URL would never be printed again after storing."
+    return 0
+  fi
+
+  if test "$SKIP_PRIVATE_SERVER" = "1"; then
+    print_info "Private server URL setup skipped (--skip-private-server)."
     return 0
   fi
 
@@ -932,7 +960,7 @@ setup_private_server_url() {
 # ── Event Voter training image info ──────────────────────────────────────────
 
 setup_event_voter_info() {
-  print_header "Event Voter — Setup and validation"
+  print_header "Step 8 — Event Voter setup"
 
   print_info "Event Voter is an experimental visual module that auto-votes in"
   print_info "Roblox in-game events. It is DISABLED by default."
@@ -1013,7 +1041,7 @@ setup_event_voter_info() {
 # ── Validation ────────────────────────────────────────────────────────────────
 
 run_validation() {
-  print_header "Step 9 — Non-live validation checks"
+  print_header "Step 10 — Non-live validation checks"
 
   print_info "Running syntax and config checks only. No live input will be sent."
   print_info ""
@@ -1264,6 +1292,19 @@ Usage:
   ./bin/setup-acc --diagnose   Write a support diagnostics file to ~/acc_setup_diagnose.txt
   ./bin/setup-acc --help       Show this help
 
+Non-interactive (scripted / CI) usage:
+  ./bin/setup-acc --profile known-good-800x600 --yes --no-install-deps --skip-private-server
+
+  --profile known-good-800x600   Pre-select the known-good 800x600 Sober/Gamescope profile.
+                                 Copies presets/800x600_known_good/ into runtime_config/.
+  --yes                          Answer "yes" to all prompts automatically (non-interactive).
+  --no-install-deps              Skip apt/flatpak package installation steps.
+  --skip-private-server          Skip the private server URL setup step.
+
+  All three flags together produce a fully non-interactive setup that applies the known-good
+  profile, installs the acc launcher under $HOME/.local/bin/acc, and runs validation.
+  Safe to use with a temporary HOME for testing (launcher and PATH updates use $HOME).
+
 What this setup does:
   - Prompts you to choose a setup profile:
       "Known-good 800x600" — recommended for new setups (calibrated pack opener,
@@ -1306,34 +1347,62 @@ EOF
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 main() {
-  local arg="${1:-}"
-
-  case "$arg" in
-    --help|-h)
-      show_help
-      exit 0
-      ;;
-    --check)
-      detect_os
-      show_status
-      exit 0
-      ;;
-    --dry-run)
-      DRY_RUN=1
-      ;;
-    --diagnose)
-      detect_os
-      run_diagnose
-      exit 0
-      ;;
-    "")
-      ;;
-    *)
-      printf 'Unknown option: %s\n' "$arg" >&2
-      printf 'Run ./bin/setup-acc --help for usage.\n' >&2
-      exit 2
-      ;;
-  esac
+  # Parse all arguments (multiple flags allowed)
+  while test "$#" -gt 0; do
+    case "$1" in
+      --help|-h)
+        show_help
+        exit 0
+        ;;
+      --check)
+        detect_os
+        show_status
+        exit 0
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        ;;
+      --diagnose)
+        detect_os
+        run_diagnose
+        exit 0
+        ;;
+      --profile)
+        shift
+        case "${1:-}" in
+          known-good-800x600|known_good_800x600)
+            PROFILE_SELECTED="known_good_800x600"
+            ;;
+          "")
+            printf 'ERROR: --profile requires a value (e.g. known-good-800x600)\n' >&2
+            exit 2
+            ;;
+          *)
+            printf 'Unknown profile: %s\n' "$1" >&2
+            printf 'Supported profiles: known-good-800x600\n' >&2
+            exit 2
+            ;;
+        esac
+        ;;
+      --yes|-y)
+        NONINTERACTIVE=1
+        ;;
+      --no-install-deps)
+        SKIP_DEPS_INSTALL=1
+        ;;
+      --skip-private-server)
+        SKIP_PRIVATE_SERVER=1
+        ;;
+      "")
+        ;;
+      *)
+        printf 'Unknown option: %s\n' "$1" >&2
+        printf 'Run ./bin/setup-acc --help for usage.\n' >&2
+        exit 2
+        ;;
+    esac
+    shift
+  done
 
   # ── Dry-run mode: non-interactive summary ─────────────────────────────────
 
@@ -1350,9 +1419,13 @@ main() {
     fi
 
     print_header "Step 2 — Choose setup profile"
-    print_info "[dry-run] Would ask:"
-    print_info "  1) Known-good 800x600 Sober/Gamescope (recommended)"
-    print_info "  2) Custom / manual configuration"
+    if test -n "$PROFILE_SELECTED"; then
+      print_info "[dry-run] Profile pre-selected via --profile: $PROFILE_SELECTED"
+    else
+      print_info "[dry-run] Would ask:"
+      print_info "  1) Known-good 800x600 Sober/Gamescope (recommended)"
+      print_info "  2) Custom / manual configuration"
+    fi
 
     print_header "Step 3 — Required programs"
     check_dependencies
@@ -1372,7 +1445,6 @@ main() {
     setup_private_server_url
     setup_event_voter_info
 
-    print_header "Step 9 — Install acc launcher"
     install_acc_launcher
 
     print_header "Step 10 — Validation"
@@ -1441,8 +1513,13 @@ main() {
     fi
   fi
 
-  # Step 2 — Choose setup profile
-  choose_setup_profile
+  # Step 2 — Choose setup profile (skip if --profile was already given)
+  if test -z "$PROFILE_SELECTED"; then
+    choose_setup_profile
+  else
+    print_header "Step 2 — Setup profile (pre-selected)"
+    print_ok "Profile: $PROFILE_SELECTED"
+  fi
 
   # Step 3 — Dependency check
   print_header "Step 3 — Checking required programs"
