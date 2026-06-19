@@ -308,4 +308,135 @@ assert_contains "$orch_output" "event_voter:       disabled" "event voter shows 
 assert_contains "$orch_output" "pack opener disabled — would idle 2s" "pack disabled message present"
 assert_not_contains "$orch_output" "event voter:" "no event voter output when disabled"
 
+# ── Test 18: event_voter_run_live_window returns 0 in dry-run ─────────────────
+drywin_exit=0
+drywin_output="$(MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" bash -c '
+  . "$MACRO_PROJECT_ROOT/src/lib/config.sh"
+  . "$MACRO_PROJECT_ROOT/src/lib/input.sh"
+  . "$MACRO_PROJECT_ROOT/src/modules/event_voter.sh"
+  event_voter_load_config 2>/dev/null || true
+  event_voter_run_live_window
+  printf "run_ok\n"
+' 2>&1)" || drywin_exit=$?
+assert_exit_zero "event_voter_run_live_window dry-run exit" "$drywin_exit"
+assert_contains "$drywin_output" "run_ok" "event_voter_run_live_window reaches return 0"
+assert_contains "$drywin_output" "dry-run mode" "event_voter_run_live_window prints dry-run message"
+
+# ── Test 19: orchestrator check_event_voter is fail-soft (|| true guard) ──────
+if grep -q 'orchestrator_check_event_voter || true' \
+   "$project_root/src/modules/orchestrator.sh"; then
+  printf 'PASS: orchestrator_check_event_voter wrapped with || true in main loop\n'
+else
+  printf 'FAIL: orchestrator_check_event_voter missing || true guard in orchestrator_run\n' >&2
+  exit 1
+fi
+
+# ── Test 20: last_attempt.log path is under runtime_config/event_voter/ ───────
+if grep -q 'last_attempt.log' "$project_root/src/modules/event_voter.sh"; then
+  printf 'PASS: last_attempt.log referenced in event_voter.sh\n'
+else
+  printf 'FAIL: last_attempt.log not found in event_voter.sh\n' >&2
+  exit 1
+fi
+ev_log_path_check="$(grep 'last_attempt.log' "$project_root/src/modules/event_voter.sh" | head -1)"
+assert_contains "$ev_log_path_check" "runtime_dir" "last_attempt.log path uses runtime_dir (config_event_voter_dir)"
+
+# ── Test 21: live_last_screen path under runtime_config/event_voter/generated/ ─
+if grep -q 'live_last_screen.png' "$project_root/src/modules/event_voter.sh"; then
+  printf 'PASS: live_last_screen.png referenced in event_voter.sh\n'
+else
+  printf 'FAIL: live_last_screen.png not found in event_voter.sh\n' >&2
+  exit 1
+fi
+if grep -q 'live_last_left.png' "$project_root/src/modules/event_voter.sh" && \
+   grep -q 'live_last_middle.png' "$project_root/src/modules/event_voter.sh" && \
+   grep -q 'live_last_right.png' "$project_root/src/modules/event_voter.sh"; then
+  printf 'PASS: live_last crop paths (left/middle/right) referenced in event_voter.sh\n'
+else
+  printf 'FAIL: live_last crop paths missing from event_voter.sh\n' >&2
+  exit 1
+fi
+
+# ── Test 22: dry-run event-voter-live-diagnostics exits 0 ─────────────────────
+diag_output="$(MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+  "$project_root/bin/macroctl" dry-run event-voter-live-diagnostics 2>&1)"
+diag_status=$?
+assert_exit_zero "dry-run event-voter-live-diagnostics" "$diag_status"
+assert_contains "$diag_output" "Event Voter Live Diagnostics" "diagnostics header"
+assert_contains "$diag_output" "no screenshots taken" "diagnostics no-screenshot note"
+
+# ── Test 23: diagnostics prints cv2/training/screenshot-tool status ───────────
+assert_contains "$diag_output" "cv2" "diagnostics shows cv2 status"
+assert_contains "$diag_output" "Training images" "diagnostics shows training image status"
+assert_contains "$diag_output" "Screenshot tool" "diagnostics shows screenshot tool status"
+assert_contains "$diag_output" "Live click armed" "diagnostics shows live click armed status"
+assert_contains "$diag_output" "last_attempt.log" "diagnostics shows last_attempt.log path"
+assert_contains "$diag_output" "results.tsv" "diagnostics shows results.tsv path"
+
+# ── Test 24: results.tsv format has 6 columns (including reason) ──────────────
+if grep -q "printf '%s\\\\t%s\\\\t%s\\\\t%s\\\\t%s\\\\t%s\\\\n'" \
+   "$project_root/src/modules/event_voter.sh"; then
+  printf 'PASS: results.tsv printf has 6 columns (reason included)\n'
+else
+  printf 'FAIL: results.tsv format missing 6th column (reason)\n' >&2
+  exit 1
+fi
+
+# ── Test 25: generated files not tracked (last_attempt.log, live_last_*.png) ──
+for check_path in \
+  "runtime_config/event_voter/last_attempt.log" \
+  "runtime_config/event_voter/generated/live_last_screen.png" \
+  "runtime_config/event_voter/results.tsv"; do
+  gitignore_check="$(git -C "$project_root" check-ignore -q "$check_path" \
+    2>&1 && printf 'ignored' || printf 'not-ignored')"
+  if test "$gitignore_check" = "ignored"; then
+    printf 'PASS: %s is gitignored\n' "$check_path"
+  else
+    root_ignored="$(git -C "$project_root" check-ignore -q "runtime_config/" \
+      2>&1 && printf 'ignored' || printf 'not-ignored')"
+    if test "$root_ignored" = "ignored"; then
+      printf 'PASS: runtime_config/ gitignored (covers %s)\n' "$check_path"
+    else
+      printf 'FAIL: %s is not gitignored\n' "$check_path" >&2
+      exit 1
+    fi
+  fi
+done
+
+# ── Test 26: orchestrator dry-run passes with Event Voter ON ──────────────────
+orch_ev_on_output="$(MACRO_INPUT_MODE=dry-run \
+  MACRO_PROJECT_ROOT="$project_root" \
+  MARKET_BUYER_DEFAULTS_FILE="$tmp_market/defaults.conf" \
+  MARKET_BUYER_POINTS_FILE="$tmp_market/points.conf" \
+  FIGURINES_BUYER_DEFAULTS_FILE="$tmp_figurines/defaults.conf" \
+  FIGURINES_BUYER_POINTS_FILE="$tmp_figurines/points.conf" \
+  RECOVERY_DEFAULTS_FILE="$tmp_recovery/defaults.conf" \
+  RECOVERY_POINTS_FILE="$tmp_recovery/points.conf" \
+  ORCHESTRATOR_EVENT_VOTER_ENABLED=1 \
+  ORCHESTRATOR_PACK_ENABLED=0 \
+  MACROCTL_PATH="$project_root/bin/macroctl" \
+  "$project_root/src/modules/orchestrator.sh" --dry-run --cycles 1 2>&1)"
+orch_ev_on_status=$?
+assert_exit_zero "orchestrator dry-run with event voter ON" "$orch_ev_on_status"
+assert_contains "$orch_ev_on_output" "event_voter:       enabled" "event voter shows enabled"
+assert_contains "$orch_ev_on_output" "DRY-RUN orchestrator complete" "orchestrator completes"
+
+# ── Test 27: Event Voter disabled path is no-op ───────────────────────────────
+orch_ev_off_output="$(MACRO_INPUT_MODE=dry-run \
+  MACRO_PROJECT_ROOT="$project_root" \
+  MARKET_BUYER_DEFAULTS_FILE="$tmp_market/defaults.conf" \
+  MARKET_BUYER_POINTS_FILE="$tmp_market/points.conf" \
+  FIGURINES_BUYER_DEFAULTS_FILE="$tmp_figurines/defaults.conf" \
+  FIGURINES_BUYER_POINTS_FILE="$tmp_figurines/points.conf" \
+  RECOVERY_DEFAULTS_FILE="$tmp_recovery/defaults.conf" \
+  RECOVERY_POINTS_FILE="$tmp_recovery/points.conf" \
+  ORCHESTRATOR_EVENT_VOTER_ENABLED=0 \
+  ORCHESTRATOR_PACK_ENABLED=0 \
+  MACROCTL_PATH="$project_root/bin/macroctl" \
+  "$project_root/src/modules/orchestrator.sh" --dry-run --cycles 1 2>&1)"
+orch_ev_off_status=$?
+assert_exit_zero "orchestrator dry-run with event voter OFF" "$orch_ev_off_status"
+assert_contains "$orch_ev_off_output" "event_voter:       disabled" "event voter shows disabled"
+assert_not_contains "$orch_ev_off_output" "event voter:" "no event voter trace when disabled"
+
 printf '\nAll event voter dry-run tests passed.\n'

@@ -34,6 +34,7 @@ usage() {
   printf '       %s dry-run event-voter --image <path>\n' "$0" >&2
   printf '       %s dry-run event-voter-schedule\n' "$0" >&2
   printf '       %s dry-run event-voter-crops --image <path>\n' "$0" >&2
+  printf '       %s dry-run event-voter-live-diagnostics\n' "$0" >&2
   printf '       %s live place-runner\n' "$0" >&2
   printf '       %s live place-e-runner\n' "$0" >&2
   printf '       %s live potion-runner\n' "$0" >&2
@@ -339,6 +340,14 @@ case "$command_name" in
           . "$project_root/src/modules/event_voter.sh"
         event_voter_load_config
         event_voter_run_offline_image "${image_arg:-}" --crops-only
+        ;;
+      event-voter-live-diagnostics)
+        shift
+        if test "$#" -ne 0; then usage; exit 2; fi
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+          . "$project_root/src/modules/event_voter.sh"
+        event_voter_load_config
+        event_voter_live_diagnostics
         ;;
       sober-launcher-status)
         shift

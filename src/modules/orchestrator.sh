@@ -176,15 +176,23 @@ orchestrator_check_event_voter() {
   if test "$_orch_event_voter_enabled" != "1"; then
     return 0
   fi
-  if ! event_voter_should_hold_now; then
+  if ! event_voter_should_hold_now 2>/dev/null; then
     return 0
   fi
   orchestrator_trace "event voter: event approaching — holding at safe boundary"
-  while ! event_voter_due_now; do
+  while ! event_voter_due_now 2>/dev/null; do
     sleep 1
   done
   orchestrator_trace "event voter: running live window"
   event_voter_run_live_window || orchestrator_trace "event voter: window exited non-zero — continuing"
+  local ev_display
+  if test "${_ev_last_action:-}" = "clicked"; then
+    ev_display="clicked ${_ev_last_label:-unknown}/${_ev_last_slot:-none} @ ${_ev_last_event_slot:-}"
+  else
+    ev_display="${_ev_last_reason:-no_target} @ ${_ev_last_event_slot:-}"
+  fi
+  run_metrics_event_vote_complete "$ev_display" 2>/dev/null || true
+  return 0
 }
 
 orchestrator_run() {
@@ -250,7 +258,7 @@ orchestrator_run() {
   while true; do
     # Safe boundary: before starting new pack cycle
     orchestrator_check_pause
-    orchestrator_check_event_voter
+    orchestrator_check_event_voter || true
 
     if test "$_orch_pack_enabled" = "1"; then
       cycle=$((cycle + 1))
@@ -258,7 +266,7 @@ orchestrator_run() {
       run_metrics_cycle_complete 2>/dev/null || true
       # Safe boundary: after pack cycle completes
       orchestrator_check_pause
-      orchestrator_check_event_voter
+      orchestrator_check_event_voter || true
     else
       orchestrator_trace "pack opener disabled — idle 2s"
       sleep 2

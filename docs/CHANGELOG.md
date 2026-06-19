@@ -1,5 +1,24 @@
 # ACC Changelog
 
+## 2026-06-19 — Event Voter live diagnostics and fail-soft patch
+
+- **Fail-soft guarantee**: Event Voter failures (screenshot capture error, detector crash,
+  no target detected, click blocked) no longer stop the full macro. The orchestrator wraps
+  all Event Voter calls with `|| true` and `event_voter_run_live_window` always returns 0.
+- **`last_attempt.log`**: Every live Event Voter attempt now writes a full diagnostic log to
+  `runtime_config/event_voter/last_attempt.log` (timestamp, event slot, screenshot cmd/path,
+  detector cmd/exit/stdout/stderr, parsed detection values, final action, reason).
+- **`results.tsv` reason column**: The results TSV gains a 6th column (`reason`) to
+  distinguish `no_target`, `capture_error`, `detector_error`, `target_found`, and `click_error`.
+- **Live screenshot/crop persistence**: The most recent live attempt's full screenshot and
+  panel crops are saved to `runtime_config/event_voter/generated/live_last_{screen,left,middle,right}.png`.
+  These files are gitignored and overwritten on each attempt.
+- **New diagnostic command**: `./bin/macroctl dry-run event-voter-live-diagnostics` prints
+  config status, cv2 availability, training image status, screenshot tool detection, and all
+  output paths — no screenshots taken, no input sent.
+- **Dashboard improvement**: The Live Dashboard Event Voter row now shows the last action and
+  reason (e.g. `no_target @ 07:00` or `clicked 3x_xp/right @ 07:40`) instead of `---`.
+
 ## 2026-06-19 — Event Voter, Sober Launcher, and UI improvements
 
 ### New modules

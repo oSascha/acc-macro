@@ -104,12 +104,11 @@ run_metrics_recovery_complete() {
 }
 
 run_metrics_event_vote_complete() {
-  local slot="${1:-none}"
-  local label="${2:-unknown}"
-  _metrics_last_event_vote="$(date +%H:%M) $slot/$label"
+  local display_text="${1:-}"
+  _metrics_last_event_vote="$display_text"
   _metrics_votes_today=$(( _metrics_votes_today + 1 ))
   _metrics_last_phase="event_voter"
-  _metrics_last_event="vote_${slot}"
+  _metrics_last_event="vote_complete"
   run_metrics_flush
 }
 

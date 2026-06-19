@@ -50,3 +50,4 @@ runtime_config/sober_launcher/private_open.log
 runtime_config/event_voter/training/
 runtime_config/event_voter/generated/
 *.tsv
+*.pid
