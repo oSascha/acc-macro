@@ -30,6 +30,10 @@ usage() {
   printf '       %s dry-run market-buyer\n' "$0" >&2
   printf '       %s dry-run figurines-buyer\n' "$0" >&2
   printf '       %s dry-run star-trials\n' "$0" >&2
+  printf '       %s dry-run dashboard-metrics\n' "$0" >&2
+  printf '       %s dry-run event-voter --image <path>\n' "$0" >&2
+  printf '       %s dry-run event-voter-schedule\n' "$0" >&2
+  printf '       %s dry-run event-voter-crops --image <path>\n' "$0" >&2
   printf '       %s live place-runner\n' "$0" >&2
   printf '       %s live place-e-runner\n' "$0" >&2
   printf '       %s live potion-runner\n' "$0" >&2
@@ -40,6 +44,16 @@ usage() {
   printf '       %s validate-config pack-opener\n' "$0" >&2
   printf '       %s validate-config orchestrator\n' "$0" >&2
   printf '       %s validate-config recovery\n' "$0" >&2
+  printf '       %s validate-config event-voter\n' "$0" >&2
+  printf '       %s validate-config sober-launcher\n' "$0" >&2
+  printf '       %s dry-run sober-launcher-status\n' "$0" >&2
+  printf '       %s dry-run sober-launcher-start\n' "$0" >&2
+  printf '       %s dry-run sober-launcher-open-private\n' "$0" >&2
+  printf '       %s dry-run sober-launcher-stop\n' "$0" >&2
+  printf '       %s sober-launcher status\n' "$0" >&2
+  printf '       %s sober-launcher start\n' "$0" >&2
+  printf '       %s sober-launcher open-private\n' "$0" >&2
+  printf '       %s sober-launcher stop\n' "$0" >&2
   printf '       %s validate-potion-plan pack-opener\n' "$0" >&2
   printf '       %s tune-walk [walk-tuner args]\n' "$0" >&2
   printf '       %s tune-potions [potion-tuner args]\n' "$0" >&2
@@ -282,6 +296,84 @@ case "$command_name" in
         fi
         MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/star_trials_dry_run.sh"
         ;;
+      dashboard-metrics)
+        shift
+        if test "$#" -ne 0; then
+          usage
+          exit 2
+        fi
+        MACRO_PROJECT_ROOT="$project_root" "$project_root/tests/dry_runs/dashboard_metrics_dry_run.sh"
+        ;;
+      event-voter)
+        shift
+        image_arg=""
+        while test "$#" -gt 0; do
+          case "$1" in
+            --image) shift; image_arg="$1"; shift ;;
+            *) usage; exit 2 ;;
+          esac
+        done
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+          . "$project_root/src/modules/event_voter.sh"
+        event_voter_load_config
+        event_voter_run_offline_image "${image_arg:-}"
+        ;;
+      event-voter-schedule)
+        shift
+        if test "$#" -ne 0; then usage; exit 2; fi
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+          . "$project_root/src/modules/event_voter.sh"
+        event_voter_load_config
+        event_voter_print_schedule
+        ;;
+      event-voter-crops)
+        shift
+        image_arg=""
+        while test "$#" -gt 0; do
+          case "$1" in
+            --image) shift; image_arg="$1"; shift ;;
+            *) usage; exit 2 ;;
+          esac
+        done
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+          . "$project_root/src/modules/event_voter.sh"
+        event_voter_load_config
+        event_voter_run_offline_image "${image_arg:-}" --crops-only
+        ;;
+      sober-launcher-status)
+        shift
+        if test "$#" -ne 0; then usage; exit 2; fi
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+          . "$project_root/src/modules/sober_launcher.sh"
+        sober_launcher_load_config
+        printf 'DRY-RUN sober-launcher-status\n'
+        sober_launcher_print_status
+        printf 'NOTE: dry-run — no process changes made\n'
+        ;;
+      sober-launcher-start)
+        shift
+        if test "$#" -ne 0; then usage; exit 2; fi
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+          . "$project_root/src/modules/sober_launcher.sh"
+        sober_launcher_load_config
+        sober_launcher_start --dry-run
+        ;;
+      sober-launcher-open-private)
+        shift
+        if test "$#" -ne 0; then usage; exit 2; fi
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+          . "$project_root/src/modules/sober_launcher.sh"
+        sober_launcher_load_config
+        sober_launcher_open_private_server_dry_run
+        ;;
+      sober-launcher-stop)
+        shift
+        if test "$#" -ne 0; then usage; exit 2; fi
+        MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+          . "$project_root/src/modules/sober_launcher.sh"
+        sober_launcher_load_config
+        sober_launcher_stop --dry-run
+        ;;
       *)
         usage
         exit 2
@@ -448,6 +540,55 @@ case "$command_name" in
         fi
         printf 'validate-config recovery: OK\n'
         ;;
+      event-voter)
+        if test "$#" -ne 0; then usage; exit 2; fi
+        # shellcheck source=../src/lib/config.sh
+        . "$project_root/src/lib/config.sh"
+        MACRO_PROJECT_ROOT="$project_root"
+        # shellcheck source=../src/modules/event_voter.sh
+        . "$project_root/src/modules/event_voter.sh"
+        event_voter_validate_config
+        ;;
+      sober-launcher)
+        if test "$#" -ne 0; then usage; exit 2; fi
+        # shellcheck source=../src/lib/config.sh
+        . "$project_root/src/lib/config.sh"
+        MACRO_PROJECT_ROOT="$project_root"
+        sl_template_dir="$(config_sober_launcher_template_dir)"
+        sl_runtime_dir="$(config_sober_launcher_dir)"
+        sl_defaults="$(config_sober_launcher_defaults_file)"
+        printf 'Sober Launcher config dir:    %s\n' "$sl_runtime_dir"
+        printf 'Sober Launcher template dir:  %s\n' "$sl_template_dir"
+        if ! test -f "$sl_template_dir/defaults.conf"; then
+          printf 'ERROR: sober launcher template not found: %s/defaults.conf\n' \
+            "$sl_template_dir" >&2
+          exit 2
+        fi
+        printf 'Template defaults: OK\n'
+        # Check template URL is blank
+        template_url="$(grep -E '^SOBER_PRIVATE_SERVER_URL=' "$sl_template_dir/defaults.conf" \
+          | tail -n1 | cut -d= -f2- || true)"
+        if test -n "$template_url"; then
+          printf 'ERROR: template contains a non-empty SOBER_PRIVATE_SERVER_URL — must be blank\n' >&2
+          exit 2
+        fi
+        printf 'Template URL: blank (OK)\n'
+        if test -f "$sl_defaults"; then
+          runtime_url="$(grep -E '^SOBER_PRIVATE_SERVER_URL=' "$sl_defaults" \
+            | tail -n1 | cut -d= -f2- || true)"
+          runtime_url="${runtime_url#\'}"
+          runtime_url="${runtime_url%\'}"
+          if test -n "$runtime_url"; then
+            printf 'Runtime URL: Configured\n'
+          else
+            printf 'Runtime URL: Missing (set SOBER_PRIVATE_SERVER_URL in %s)\n' "$sl_defaults"
+          fi
+        else
+          printf 'Runtime defaults: not yet bootstrapped (will be created on first use)\n'
+          printf 'Runtime URL: Missing\n'
+        fi
+        printf 'validate-config sober-launcher: OK\n'
+        ;;
       *)
         usage
         exit 2
@@ -482,6 +623,55 @@ case "$command_name" in
       exit 2
     fi
     MACRO_PROJECT_ROOT="$project_root" "$project_root/src/host/status.sh"
+    ;;
+  sober-launcher)
+    shift
+    sl_subcommand="${1:-}"
+    shift || true
+    MACRO_PROJECT_ROOT="$project_root"
+    # shellcheck source=../src/modules/sober_launcher.sh
+    . "$project_root/src/modules/sober_launcher.sh"
+    sober_launcher_load_config
+    case "$sl_subcommand" in
+      status)
+        if test "$#" -ne 0; then usage; exit 2; fi
+        sober_launcher_print_status
+        ;;
+      start)
+        if test "$#" -ne 0; then usage; exit 2; fi
+        sober_launcher_start_normal
+        ;;
+      open-private)
+        sl_open_flag="${1:-}"
+        shift || true
+        if test "$#" -ne 0; then usage; exit 2; fi
+        case "$sl_open_flag" in
+          "")
+            # Proceed: browser/roblox-player handoff launches Sober itself
+            ;;
+          --start-if-offline)
+            printf 'ERROR: --start-if-offline is no longer used.\n' >&2
+            printf '  The private-server protocol handoff launches Sober through the\n' >&2
+            printf '  roblox-player URI handler. Starting Sober first would double-launch.\n' >&2
+            printf '  Run: %s sober-launcher open-private\n' "$0" >&2
+            exit 1
+            ;;
+          *)
+            usage
+            exit 2
+            ;;
+        esac
+        sober_launcher_open_private_server
+        ;;
+      stop)
+        if test "$#" -ne 0; then usage; exit 2; fi
+        sober_launcher_stop
+        ;;
+      *)
+        usage
+        exit 2
+        ;;
+    esac
     ;;
   ui)
     shift

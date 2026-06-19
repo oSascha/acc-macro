@@ -1,17 +1,50 @@
-# ACC - Automated Cycle Controller
+# ACC — Automated Cycle Controller
 
 ACC is a Bash-based local automation macro for Roblox on Linux. It runs through
 [Sober](https://sober.vinegarhq.org/) (the Roblox Flatpak client) inside a nested
 [Gamescope](https://github.com/ValveSoftware/gamescope) session and automates
-pack-opening cycles, optional shop/market buying, and figurines buying.
+pack-opening cycles, optional shop/market buying, figurines buying, and more.
 
-Features:
-- Pack opener with configurable potion use and click burst control
-- Shop buyer, market buyer, and figurines buyer modules
-- Orchestrator for scheduled cycling between tasks
-- Optional recovery/restart after long sessions
-- Dry-run mode for validation without live input
-- Terminal UI (`pack-opener-ui`) with pause/resume/stop controls
+## Features
+
+- **Pack Opener** — configurable potion use, click burst control, timing presets
+- **Market Buyer** — scheduled market purchase cycles
+- **Figurines Buyer** — automated figurine purchase runs
+- **Full Macro Orchestrator** — cycles between all active modules on a schedule
+- **Live Dashboard** — terminal UI with status display, pause/resume/stop controls
+- **Sober Instance Launcher** — launches Sober inside Gamescope, optionally joins a private server
+- **Recovery Restart** — automatic rejoin after long sessions or crashes (optional)
+- **Event Voter** *(experimental)* — visual module that auto-votes in Roblox in-game events using OpenCV template matching
+- **Dry-run mode** — validate config and timing without sending any live input
+- **Pop!_OS setup wizard** — guided install and config wizard for Pop!_OS/Ubuntu users
+
+## Quick Start
+
+```bash
+git clone https://github.com/oSascha/acc-macro.git
+cd acc-macro
+chmod +x bin/setup-acc
+./bin/setup-acc
+```
+
+Once set up:
+
+```bash
+./bin/acc        # or just: acc  (if installed via bin/install-acc-launcher)
+```
+
+### Setup wizard flags
+
+```bash
+./bin/setup-acc           # Full interactive setup
+./bin/setup-acc --check   # Check system and config status only (no writes)
+./bin/setup-acc --dry-run # Print what the setup would do, without doing it
+./bin/setup-acc --help    # Show help
+```
+
+The wizard checks your system, installs dependencies via `apt`, sets up your local
+`runtime_config/` folder, lets you choose the 800x600 preset, and runs non-live
+validation. **It does not run the live macro.**
 
 ## Tested Environment
 
@@ -25,54 +58,34 @@ Originally developed and tested on:
 | Nest session| Gamescope nested inside the Wayland compositor |
 | Input tool  | xdotool (X11, targeting the nested display)    |
 
-**Pop!_OS compatibility is expected** and an included setup wizard makes it easy.
+**Pop!_OS compatibility is expected.** The included setup wizard makes it easy.
 See [docs/SETUP_POP_OS.md](docs/SETUP_POP_OS.md).
 
-## Quick Start (Pop!_OS — Recommended)
-
-The easiest way to get started is the setup wizard:
-
-```bash
-# 1. Clone and enter the repo
-git clone <repo-url> acc
-cd acc
-
-# 2. Make the setup wizard executable and run it
-chmod +x bin/setup-acc
-./bin/setup-acc
-```
-
-The wizard will:
-- Check your system and installed programs
-- Offer to install missing dependencies via `apt` (asks before running sudo)
-- Offer to install Sober via Flatpak
-- Create your local `runtime_config/` folder
-- Let you choose the **800x600 preset** (pre-filled coordinates) or a **blank config**
-- Optionally store your private server URL for recovery restarts
-- Run non-live validation checks
-
-**The wizard does not run the live macro.** Test carefully before running live.
-
-### Setup wizard flags
-
-```bash
-./bin/setup-acc           # Full interactive setup
-./bin/setup-acc --check   # Check system and config status only (no writes)
-./bin/setup-acc --dry-run # Print what the setup would do, without doing it
-./bin/setup-acc --help    # Show help
-```
-
-## Manual Setup (Alternative)
-
-If you prefer to set up manually, see [docs/SETUP_POP_OS.md](docs/SETUP_POP_OS.md).
-
-## Important: Calibration Required
+## Calibration Required
 
 All screen coordinates are specific to your monitor resolution, Gamescope window
 size, and display scaling. The included 800x600 preset only works if your setup
 matches. If clicks land in the wrong place, calibrate manually.
 
 See [docs/CALIBRATION.md](docs/CALIBRATION.md).
+
+## Event Voter — Training Images
+
+Event Voter is disabled by default (`EVENT_VOTER_ENABLED=0`). To use it you must
+provide your own training screenshots — the public repo does not ship private game
+screenshots.
+
+After setup, place your training images here:
+
+```
+runtime_config/event_voter/training/live_event_seed.png
+runtime_config/event_voter/training/live_event_seed_mutation.png
+```
+
+See [docs/EVENT_VOTER_EXPERIMENT.md](docs/EVENT_VOTER_EXPERIMENT.md) for how to
+capture them and configure the module.
+
+Requires `python3-opencv`. The setup wizard will check for it.
 
 ## Repository Layout
 
@@ -87,20 +100,33 @@ docs/                 Setup, calibration, and security documentation
 runtime_config/       Your local runtime config (gitignored — never committed)
 ```
 
-## What Is NOT Included
+## Privacy and Security
 
-This repository intentionally omits:
+`runtime_config/` is gitignored. It contains your personal coordinates,
+timings, and optionally a private server URL. It is never committed.
 
-- Private Roblox server URLs (set locally in `runtime_config/recovery/defaults.conf`)
-- Debug logs and run snapshots
-- Internal development notes and implementation contracts
-
-## Security
+Private server URLs are stored locally only:
+- `runtime_config/recovery/defaults.conf`
+- `runtime_config/sober_launcher/defaults.conf`
 
 See [docs/SECURITY_AND_PRIVACY.md](docs/SECURITY_AND_PRIVACY.md) before pushing
 changes to your own fork.
 
-## Pop!_OS Notes
+## What Is NOT Included
 
-See [docs/SETUP_POP_OS.md](docs/SETUP_POP_OS.md) and
-[docs/POP_OS_COMPATIBILITY_AUDIT.md](docs/POP_OS_COMPATIBILITY_AUDIT.md).
+This repository intentionally omits:
+
+- Private Roblox server URLs (set locally in `runtime_config/`)
+- Event Voter training screenshots (add your own locally)
+- Debug logs, run snapshots, audit logs
+- Internal development notes and contracts
+
+## Docs
+
+- [docs/SETUP_POP_OS.md](docs/SETUP_POP_OS.md) — Pop!_OS / Ubuntu setup guide
+- [docs/CALIBRATION.md](docs/CALIBRATION.md) — coordinate calibration
+- [docs/EVENT_VOTER_EXPERIMENT.md](docs/EVENT_VOTER_EXPERIMENT.md) — Event Voter module
+- [docs/SOBER_INSTANCE_LAUNCHER.md](docs/SOBER_INSTANCE_LAUNCHER.md) — Sober Launcher module
+- [docs/SECURITY_AND_PRIVACY.md](docs/SECURITY_AND_PRIVACY.md) — security guidance
+- [docs/POP_OS_COMPATIBILITY_AUDIT.md](docs/POP_OS_COMPATIBILITY_AUDIT.md) — compatibility notes
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — release notes

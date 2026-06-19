@@ -18,7 +18,11 @@ POINTS_FILE="$RUNTIME_DIR/points.conf"
 MARKET_BUYER_POINTS_FILE="$PROJECT_ROOT/runtime_config/market_buyer/points.conf"
 FIGURINES_BUYER_POINTS_FILE="$PROJECT_ROOT/runtime_config/figurines_buyer/points.conf"
 LOG_DIR="$PROJECT_ROOT/05_debug_snapshots/logs"
+METRICS_FILE="$PROJECT_ROOT/runtime_config/orchestrator/run_metrics.conf"
 MACROCTL="$PROJECT_ROOT/bin/macroctl"
+
+# ACC_DEBUG_LOGS=1 enables persistent log files for Full Macro (default: off).
+ACC_DEBUG_LOGS="${ACC_DEBUG_LOGS:-0}"
 
 # shellcheck source=../src/lib/orchestrator_control.sh
 . "$PROJECT_ROOT/src/lib/orchestrator_control.sh"
@@ -63,6 +67,7 @@ fi
 status_label="READY"
 ACC_STOP_REQUESTED=0
 _acc_full_macro_orch_pid=""
+_full_macro_start_epoch=0
 
 # Session-state module toggles (1 = enabled, 0 = disabled)
 # Changed in module_toggles_loop(); passed as env vars to orchestrator.
@@ -71,11 +76,19 @@ TOGGLE_MARKET_BUYER=1
 TOGGLE_FIGURINES_BUYER=1
 TOGGLE_STAR_TRIALS=0
 TOGGLE_RECOVERY_RESTART=0
+TOGGLE_EVENT_VOTER=0
 
 # Recovery config paths (read-only helpers for UI display)
 RECOVERY_RUNTIME_DIR="$PROJECT_ROOT/runtime_config/recovery"
 RECOVERY_DEFAULTS_FILE_UI="$RECOVERY_RUNTIME_DIR/defaults.conf"
 RECOVERY_POINTS_FILE_UI="$RECOVERY_RUNTIME_DIR/points.conf"
+
+EVENT_VOTER_DEFAULTS_FILE="$PROJECT_ROOT/runtime_config/event_voter/defaults.conf"
+
+SOBER_LAUNCHER_DEFAULTS_FILE="$PROJECT_ROOT/runtime_config/sober_launcher/defaults.conf"
+
+# shellcheck source=../src/modules/sober_launcher.sh
+. "$PROJECT_ROOT/src/modules/sober_launcher.sh"
 
 usage() {
   cat <<EOF
@@ -179,6 +192,29 @@ recovery_module_label() {
   fi
 }
 
+event_voter_config_get() {
+  local key="$1"
+  config_get "$EVENT_VOTER_DEFAULTS_FILE" "$key" 2>/dev/null || true
+}
+
+event_voter_status_label() {
+  local toggle="$1"
+  if test "$toggle" != "1"; then
+    printf '%s[OFF          ]%s Event Voter\n' "$YELLOW" "$RESET"
+    return
+  fi
+  local ev_enabled ev_live
+  ev_enabled="$(event_voter_config_get EVENT_VOTER_ENABLED)"
+  ev_live="$(event_voter_config_get EVENT_VOTER_LIVE_ALLOWED)"
+  if test "${ev_enabled:-0}" != "1"; then
+    printf '%s[NEEDS CONFIG ]%s Event Voter\n' "$RED" "$RESET"
+  elif test "${ev_live:-0}" = "1"; then
+    printf '%s[LIVE ARMED   ]%s Event Voter\n' "$GREEN" "$RESET"
+  else
+    printf '%s[READY        ]%s Event Voter\n' "$CYAN" "$RESET"
+  fi
+}
+
 clear_screen() {
   if test "$interactive" -eq 1; then
     printf '\033[2J\033[H'
@@ -199,20 +235,20 @@ terminal_width() {
 }
 
 small_logo() {
-  printf '%s   ___   ______ ______%s\n' "$CYAN" "$RESET"
-  printf '%s  / _ | / ___/ // / _ \\%s\n' "$CYAN" "$RESET"
-  printf '%s / __ |/ /__/ _  / ___/%s\n' "$CYAN" "$RESET"
-  printf '%s/_/ |_|\\___/_//_/_/%s\n' "$CYAN" "$RESET"
+  printf '%s   ___    ____   ____%s\n' "$CYAN" "$RESET"
+  printf '%s  / _ |  / ___/ / ___/%s\n' "$CYAN" "$RESET"
+  printf '%s / __ |  | |   | |   %s\n' "$CYAN" "$RESET"
+  printf '%s/_/ |_|  \\___/  \\___/%s\n' "$CYAN" "$RESET"
   printf '%sAUTO CYCLE CONTROLLER%s\n' "$GREY" "$RESET"
 }
 
 print_art() {
   printf '%s' "$CYAN"
   cat <<'EOF'
-   ___   ______ ______
-  / _ | / ___/ // / _ \
- / __ |/ /__/ _  / ___/
-/_/ |_|\___/_//_/_/
+   ___    ____   ____
+  / _ |  / ___/ / ___/
+ / __ |  | |   | |
+/_/ |_|  \___/  \___/
 
 AUTO CYCLE CONTROLLER
 EOF
@@ -298,6 +334,206 @@ show_running_side_profile() {
   printf '%s\n' "$RESET"
 }
 
+# ── Live dashboard renderer ───────────────────────────────────────────────────
+#
+# Box geometry:  total width = 56  (╔ + 54×═ + ╗)
+#   interior:    54 chars  = 2 lead + 18 label + 2 gap + 30 value + 2 trail
+#
+_DASH_LABEL_W=18
+_DASH_VALUE_W=30
+
+# Strip ANSI escape sequences from a string (for visible-length measurement).
+strip_ansi() {
+  printf '%s' "$1" | sed $'s/\033\\[[0-9;]*m//g'
+}
+
+# Print a full-width separator line (╠═…═╣).
+dashboard_sep() {
+  printf '%s╠══════════════════════════════════════════════════════╣%s\n' \
+    "$MAGENTA" "$RESET"
+}
+
+# Print one content row with a left-aligned label and a left-aligned value.
+# $1 = plain label text   (no ANSI; padded to _DASH_LABEL_W)
+# $2 = plain visible value (no ANSI; padded to _DASH_VALUE_W)
+# $3 = optional color prefix applied to the value field
+# $4 = optional color suffix (reset) applied after the value field
+dashboard_row() {
+  local label="$1" value="$2" vpre="${3:-}" vsuf="${4:-}"
+  local label_str value_str
+  printf -v label_str '%-*s' "$_DASH_LABEL_W" "$label"
+  printf -v value_str '%-*s' "$_DASH_VALUE_W" "$value"
+  # Interior visible chars: 2 + 18 + 2 + 30 + 2 = 54  ✓
+  printf '%s║%s  %s  %s%s%s  %s║%s\n' \
+    "$MAGENTA" "$RESET" "$label_str" "$vpre" "$value_str" "$vsuf" "$MAGENTA" "$RESET"
+}
+
+# Print a header line (text starts after 2-space indent, right side padded).
+# $1 = plain text   $2 = color prefix (opt)   $3 = color suffix (opt)
+dashboard_header() {
+  local text="$1" pre="${2:-}" suf="${3:-}"
+  local tlen="${#text}"
+  # inner=54, lead=2  →  trailing pad = 54 - 2 - tlen
+  local pad_count=$(( 54 - 2 - tlen ))
+  local pad_str
+  printf -v pad_str '%*s' "$pad_count" ''
+  printf '%s║%s  %s%s%s%s%s║%s\n' \
+    "$MAGENTA" "$RESET" "$pre" "$text" "$suf" "$pad_str" "$MAGENTA" "$RESET"
+}
+
+# Print the controls line for the current view and orchestrator state.
+# Uses \r\033[2K so it works both as a fresh line (after dashboard/art redraw)
+# and as an in-place update while staying on the same terminal line.
+print_live_controls_line() {
+  local view="$1"    # "art" or "dash"
+  local state="$2"   # running / pause_requested / paused / continue_requested
+  case "$state" in
+    running)
+      if test "$view" = "dash"; then
+        printf '\r\033[2K%sControls: d = art | p = pause after current loop | Ctrl+C = stop%s' \
+          "$DIM" "$RESET"
+      else
+        printf '\r\033[2K%sControls: d = dashboard | p = pause after current loop | Ctrl+C = stop%s' \
+          "$DIM" "$RESET"
+      fi
+      ;;
+    pause_requested)
+      printf '\r\033[2K%sControls: d = toggle view | pause requested — will pause after current loop | Ctrl+C = stop%s' \
+        "$YELLOW" "$RESET"
+      ;;
+    paused)
+      printf '\r\033[2K%sControls: d = toggle view | c = continue | Ctrl+C = stop%s' \
+        "$CYAN" "$RESET"
+      ;;
+    continue_requested)
+      printf '\r\033[2K%sControls: d = toggle view | resuming... | Ctrl+C = stop%s' \
+        "$DIM" "$RESET"
+      ;;
+    *)
+      printf '\r\033[2K%sControls: Ctrl+C = stop%s' "$DIM" "$RESET"
+      ;;
+  esac
+}
+
+# Read the run_metrics.conf file into _dash_* globals.
+# Called once per dashboard refresh — never inside click/sleep hot paths.
+_dash_read_metrics() {
+  _dash_cycles=0
+  _dash_bpc=13
+  _dash_last_phase=""
+  _dash_last_event=""
+  _dash_market=0
+  _dash_figurines=0
+  _dash_recovery=0
+  _dash_started_epoch=0
+  _dash_ev_enabled=0
+  _dash_last_ev_vote=""
+
+  if ! test -f "$METRICS_FILE"; then
+    return 0
+  fi
+
+  local k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      COMPLETED_PACK_CYCLES) _dash_cycles="$v" ;;
+      BUNDLES_PER_CYCLE)     _dash_bpc="$v" ;;
+      LAST_PHASE)            _dash_last_phase="$v" ;;
+      LAST_EVENT)            _dash_last_event="$v" ;;
+      MARKET_RUNS)           _dash_market="$v" ;;
+      FIGURINES_RUNS)        _dash_figurines="$v" ;;
+      RECOVERY_RUNS)         _dash_recovery="$v" ;;
+      RUN_STARTED_AT_EPOCH)  _dash_started_epoch="$v" ;;
+      EVENT_VOTER_ENABLED)   _dash_ev_enabled="$v" ;;
+      LAST_EVENT_VOTE)       _dash_last_ev_vote="$v" ;;
+    esac
+  done < "$METRICS_FILE" 2>/dev/null || true
+}
+
+show_live_dashboard() {
+  local run_start_epoch="$1"
+  local ctrl_state="$2"
+
+  _dash_read_metrics
+
+  # Runtime clock (prefer epoch from metrics file when available)
+  local epoch_for_calc="$run_start_epoch"
+  if test "${_dash_started_epoch:-0}" -gt 0; then
+    epoch_for_calc="$_dash_started_epoch"
+  fi
+
+  local now_epoch elapsed h m s run_time_str
+  now_epoch="$(date +%s)"
+  elapsed=$(( now_epoch - epoch_for_calc ))
+  test "$elapsed" -lt 0 && elapsed=0
+  h=$(( elapsed / 3600 ))
+  m=$(( (elapsed % 3600) / 60 ))
+  s=$(( elapsed % 60 ))
+  printf -v run_time_str '%02d:%02d:%02d' "$h" "$m" "$s"
+
+  local estimated_bundles=$(( _dash_cycles * _dash_bpc ))
+
+  local pause_str pause_color
+  case "$ctrl_state" in
+    running)            pause_str="RUNNING";         pause_color="$GREEN" ;;
+    pause_requested)    pause_str="PAUSE REQUESTED"; pause_color="$YELLOW" ;;
+    paused)             pause_str="PAUSED";          pause_color="$YELLOW" ;;
+    continue_requested) pause_str="RESUMING";        pause_color="$CYAN" ;;
+    *)                  pause_str="UNKNOWN";         pause_color="$GREY" ;;
+  esac
+
+  local debug_str
+  if test "${ACC_DEBUG_LOGS:-0}" = "1"; then
+    debug_str="ON  (ACC_DEBUG_LOGS=1)"
+  else
+    debug_str="OFF"
+  fi
+
+  local last_info="${_dash_last_phase:----}"
+  if test -n "${_dash_last_event:-}"; then
+    last_info="${_dash_last_phase:----} / ${_dash_last_event}"
+  fi
+
+  # Module toggle labels (plain visible text; colors passed separately)
+  local pack_lbl market_lbl fig_lbl rec_lbl
+  local pack_col market_col fig_col rec_col
+  if test "$TOGGLE_PACK_OPENER"       = "1"; then pack_lbl="[ON ]";  pack_col="$GREEN";  else pack_lbl="[OFF]";  pack_col="$YELLOW"; fi
+  if test "$TOGGLE_MARKET_BUYER"      = "1"; then market_lbl="[ON ]"; market_col="$GREEN"; else market_lbl="[OFF]"; market_col="$YELLOW"; fi
+  if test "$TOGGLE_FIGURINES_BUYER"   = "1"; then fig_lbl="[ON ]";   fig_col="$GREEN";   else fig_lbl="[OFF]";   fig_col="$YELLOW"; fi
+  if test "$TOGGLE_RECOVERY_RESTART"  = "1"; then rec_lbl="[ON ]";   rec_col="$GREEN";   else rec_lbl="[OFF]";   rec_col="$YELLOW"; fi
+  local ev_lbl ev_col
+  if test "$TOGGLE_EVENT_VOTER" = "1"; then ev_lbl="[ON ]"; ev_col="$GREEN"; else ev_lbl="[OFF]"; ev_col="$YELLOW"; fi
+
+  local buyer_str
+  printf -v buyer_str 'Market: %s  Figurines: %s' "$_dash_market" "$_dash_figurines"
+
+  clear_screen
+  printf '%s╔══════════════════════════════════════════════════════╗%s\n' "$MAGENTA" "$RESET"
+  dashboard_header "ACC // LIVE DASHBOARD" "$BOLD$CYAN" "$RESET"
+  dashboard_sep
+  dashboard_row "Run time"      "$run_time_str"
+  dashboard_row "Pack cycles"   "$_dash_cycles"
+  dashboard_row "Bundles/cycle" "$_dash_bpc"
+  dashboard_row "Est. bundles"  "$estimated_bundles" "$BOLD$CYAN" "$RESET"
+  dashboard_sep
+  dashboard_row "Status"     "$pause_str"  "$pause_color" "$RESET"
+  dashboard_row "Last event" "$last_info"
+  dashboard_sep
+  dashboard_row "Pack Opener"      "$pack_lbl"   "$pack_col"   "$RESET"
+  dashboard_row "Market Buyer"     "$market_lbl" "$market_col" "$RESET"
+  dashboard_row "Figurines Buyer"  "$fig_lbl"    "$fig_col"    "$RESET"
+  dashboard_row "Recovery Restart" "$rec_lbl"    "$rec_col"    "$RESET"
+  dashboard_row "Event Voter"      "$ev_lbl"     "$ev_col"     "$RESET"
+  dashboard_sep
+  dashboard_row "Buyer runs"    "$buyer_str"
+  dashboard_row "Recovery runs" "$_dash_recovery"
+  if test "${_dash_ev_enabled:-0}" = "1"; then
+    dashboard_row "Event Voter" "${_dash_last_ev_vote:----}"
+  fi
+  dashboard_row "Debug logs"    "$debug_str"
+  printf '%s╚══════════════════════════════════════════════════════╝%s\n' "$MAGENTA" "$RESET"
+}
+
 startup_pulse() {
   if test "$use_animation" -ne 1; then
     return
@@ -336,19 +572,20 @@ main_menu() {
   clear_screen
   small_logo
   printf '%s╔══════════════════════════════════════════════════════════════╗%s\n' "$MAGENTA" "$RESET"
-  printf '%s║%s  %sACC // PACK OPENER%s                                         %s║%s\n' "$MAGENTA" "$RESET" "$BOLD$CYAN" "$RESET" "$MAGENTA" "$RESET"
-  printf '%s║%s  %sSober / Gamescope Live Control%s                            %s║%s\n' "$MAGENTA" "$RESET" "$GREY" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  %sACC // PACK OPENER%s                                          %s║%s\n' "$MAGENTA" "$RESET" "$BOLD$CYAN" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  %sSober / Gamescope Live Control%s                              %s║%s\n' "$MAGENTA" "$RESET" "$GREY" "$RESET" "$MAGENTA" "$RESET"
   printf '%s╠══════════════════════════════════════════════════════════════╣%s\n' "$MAGENTA" "$RESET"
-  printf '%s║%s  Pack Opener: %s%-8s%s  Potions: %-3s  Cycle: base→potion→pack %s║%s\n' \
+  printf '%s║%s  Pack Opener: %s%-8s%s  Potions: %-3s  Cycle: base→potion→pack%s║%s\n' \
     "$MAGENTA" "$RESET" "$(status_color "$status_label")" "$status_label" "$RESET" "$potion_state" "$MAGENTA" "$RESET"
-  printf '%s║%s  Stop: %sCtrl+C%s while running                                %s║%s\n' "$MAGENTA" "$RESET" "$YELLOW" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  Stop: %sCtrl+C%s while running                                  %s║%s\n' "$MAGENTA" "$RESET" "$YELLOW" "$RESET" "$MAGENTA" "$RESET"
   printf '%s╠══════════════════════════════════════════════════════════════╣%s\n' "$MAGENTA" "$RESET"
-  printf '%s║%s  %s1) Start Full Macro%s                                        %s║%s\n' "$MAGENTA" "$RESET" "$BOLD" "$RESET" "$MAGENTA" "$RESET"
-  printf '%s║%s  2) Module toggles                                         %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
-  printf '%s║%s  3) Macro status                                           %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
-  printf '%s║%s  4) Macro modules                                          %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
-  printf '%s║%s  5) Advanced / Testing / Calibration                       %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
-  printf '%s║%s  q) Quit                                                   %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  %s1) Sober Instance%s                                           %s║%s\n' "$MAGENTA" "$RESET" "$BOLD" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  %s2) Start Full Macro%s                                         %s║%s\n' "$MAGENTA" "$RESET" "$BOLD" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  3) Module toggles                                           %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  4) Macro status                                             %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  5) Macro modules                                            %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  6) Advanced / Testing / Calibration                         %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+  printf '%s║%s  q) Quit                                                     %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
   printf '%s╚══════════════════════════════════════════════════════════════╝%s\n' "$MAGENTA" "$RESET"
   printf '\nChoose: '
 }
@@ -479,6 +716,8 @@ print_modules_screen() {
   printf '%s               Imported / legacy / experimental — not enabled for live runs%s\n\n' "$GREY" "$RESET"
   recovery_module_label "$TOGGLE_RECOVERY_RESTART" "Recovery Restart"
   printf '%s               Optional Sober restart every N minutes to recover from long-session lag%s\n\n' "$GREY" "$RESET"
+  event_voter_status_label "$TOGGLE_EVENT_VOTER"
+  printf '%s               Experimental — votes at ACC Live Events (07:00/07:20/07:40 and 19:00/19:20/19:40 AMS)%s\n\n' "$GREY" "$RESET"
   printf '%s[READY        ]%s Orchestrator — 10-Minute Combo Scheduler\n' "$GREEN" "$RESET"
   printf '%s               Runs pack opener continuously;\n' "$GREY"
   printf '               at :00/:10/:20/:30/:40/:50 runs Market Buyer then Figurines Buyer;%s\n' "$RESET"
@@ -907,6 +1146,212 @@ launch_walking_path() {
   "$PROJECT_ROOT/bin/walk-tuner"
 }
 
+# ── Sober Instance submenu ───────────────────────────────────────────────────
+
+_sober_ui_status_color() {
+  local status="$1"
+  case "$status" in
+    live)           printf '%s' "$GREEN" ;;
+    live_untracked) printf '%s' "$YELLOW" ;;
+    offline)        printf '%s' "$GREY" ;;
+    *)              printf '%s' "$RESET" ;;
+  esac
+}
+
+_sober_ui_status_label() {
+  local status="$1"
+  case "$status" in
+    live)           printf 'Live' ;;
+    live_untracked) printf 'Live (untracked)' ;;
+    offline)        printf 'Offline' ;;
+    *)              printf '%s' "$status" ;;
+  esac
+}
+
+# ── Sober submenu box helpers ─────────────────────────────────────────────────
+# Fixed inner width matching the main menu box (62 visible chars between ║ and ║).
+_SOBER_BOX_INNER=62
+_SOBER_BOX_RULE='══════════════════════════════════════════════════════════════'
+
+# Strip ANSI escape sequences from a string (for visible-length measurement).
+_sober_strip_ansi() {
+  printf '%s' "$1" | sed $'s/\033\\[[0-9;]*m//g'
+}
+
+# Compute visible (non-ANSI) length of a string.
+_sober_vis_len() {
+  local s
+  s="$(_sober_strip_ansi "$1")"
+  printf '%s' "${#s}"
+}
+
+# Pad content (which may contain ANSI codes) to exactly _SOBER_BOX_INNER visible chars.
+_sober_pad() {
+  local content="$1"
+  local vlen pad
+  vlen="$(_sober_vis_len "$content")"
+  pad=$(( _SOBER_BOX_INNER - vlen ))
+  if test "$pad" -gt 0; then
+    printf '%s%*s' "$content" "$pad" ''
+  else
+    printf '%s' "$content"
+  fi
+}
+
+# Print a box content row: MAGENTA║RESET + padded content + MAGENTA║RESET
+_sober_box_line() {
+  printf '%s║%s%s%s║%s\n' \
+    "$MAGENTA" "$RESET" "$(_sober_pad "$1")" "$MAGENTA" "$RESET"
+}
+
+_sober_box_top()    { printf '%s╔%s╗%s\n' "$MAGENTA" "$_SOBER_BOX_RULE" "$RESET"; }
+_sober_box_divider(){ printf '%s╠%s╣%s\n' "$MAGENTA" "$_SOBER_BOX_RULE" "$RESET"; }
+_sober_box_bottom() { printf '%s╚%s╝%s\n' "$MAGENTA" "$_SOBER_BOX_RULE" "$RESET"; }
+
+print_sober_instance_menu() {
+  local sl_status sl_url_status sl_size sl_status_colored
+
+  MACRO_PROJECT_ROOT="$PROJECT_ROOT"
+  sober_launcher_load_config
+
+  sl_status="$(sober_launcher_status)"
+  sl_status_colored="$(_sober_ui_status_color "$sl_status")$(_sober_ui_status_label "$sl_status")$RESET"
+  if sober_launcher_has_private_url; then
+    sl_url_status="Configured"
+  else
+    sl_url_status="${RED}Missing${RESET}"
+  fi
+  sl_size="${_sl_width}x${_sl_height}"
+
+  clear_screen
+  small_logo
+  _sober_box_top
+  _sober_box_line "  ${BOLD}${CYAN}Sober Instance${RESET}"
+  _sober_box_divider
+  _sober_box_line "  Status:              $sl_status_colored"
+  _sober_box_line "  Private server link: $sl_url_status"
+  _sober_box_line "  Launch mode:         Browser handoff + Sober in Gamescope"
+  _sober_box_line "  Gamescope size:      $sl_size"
+  _sober_box_divider
+  _sober_box_line "  1) Start Sober normally"
+  _sober_box_line "  2) Open configured private server"
+  _sober_box_line "  3) Stop current Sober instance"
+  _sober_box_line "  4) Back"
+  _sober_box_bottom
+  printf '\nChoose: '
+}
+
+sober_instance_loop() {
+  local choice sl_status
+
+  while true; do
+    print_sober_instance_menu
+    read -r choice
+    MACRO_PROJECT_ROOT="$PROJECT_ROOT"
+    sober_launcher_load_config
+    case "$choice" in
+      1)
+        # ── Start Sober normally ────────────────────────────────────────────
+        clear_screen
+        sl_status="$(sober_launcher_status)"
+        if test "$sl_status" = "live" || test "$sl_status" = "live_untracked"; then
+          printf '%sAn instance is already running (%s).%s\n' \
+            "$YELLOW" "$(_sober_ui_status_label "$sl_status")" "$RESET"
+          printf 'Stop it and start a new one? [y/N] '
+          local typed
+          read -r typed
+          case "${typed:-}" in
+            y|Y|yes|YES)
+              printf 'Stopping current instance...\n'
+              sober_launcher_stop
+              sleep 1
+              ;;
+            *)
+              printf 'Cancelled.\n'
+              pause_return
+              continue
+              ;;
+          esac
+        fi
+        printf 'Starting Sober normally...\n'
+        sober_launcher_start_normal
+        pause_return
+        ;;
+      2)
+        # ── Open configured private server ──────────────────────────────────
+        clear_screen
+        if ! sober_launcher_has_private_url; then
+          printf '%sERROR: Private server URL is not configured.%s\n' "$RED" "$RESET"
+          printf 'Set SOBER_PRIVATE_SERVER_URL in:\n'
+          printf '  %s/runtime_config/sober_launcher/defaults.conf\n' "$PROJECT_ROOT"
+          printf 'See docs/SOBER_INSTANCE_LAUNCHER.md for setup instructions.\n'
+          pause_return
+          continue
+        fi
+        sl_status="$(sober_launcher_status)"
+        printf 'This opens the Roblox private-server page in your browser.\n'
+        printf 'Your browser may ask to open a roblox-player link — that protocol\n'
+        printf 'handoff will launch/join Sober in Gamescope by itself.\n'
+        printf 'Select "Always allow %s to open roblox-player links" to skip future prompts.\n' \
+          "https://www.roblox.com"
+        printf '\n'
+        if test "$sl_status" = "live" || test "$sl_status" = "live_untracked"; then
+          printf '%sNote: Sober is already running (%s).%s\n' \
+            "$YELLOW" "$(_sober_ui_status_label "$sl_status")" "$RESET"
+          printf 'Opening the link may launch a new Sober session through the protocol handler.\n\n'
+        fi
+        printf 'Open configured private server link now? [y/N] '
+        local typed_open
+        read -r typed_open
+        case "${typed_open:-}" in
+          y|Y|yes|YES)
+            sober_launcher_open_private_server
+            ;;
+          *)
+            printf 'Cancelled.\n'
+            ;;
+        esac
+        pause_return
+        ;;
+      3)
+        # ── Stop current Sober instance ─────────────────────────────────────
+        clear_screen
+        sl_status="$(sober_launcher_status)"
+        if test "$sl_status" = "offline"; then
+          printf 'No Sober instance appears to be running.\n'
+          pause_return
+          continue
+        fi
+        if test "$sl_status" = "live_untracked"; then
+          printf '%sInstance is Live (untracked) — not managed by this launcher.%s\n' "$YELLOW" "$RESET"
+          printf 'Stop it anyway? [y/N] '
+          local typed_stop
+          read -r typed_stop
+          case "${typed_stop:-}" in
+            y|Y|yes|YES) ;;
+            *)
+              printf 'Cancelled.\n'
+              pause_return
+              continue
+              ;;
+          esac
+        else
+          printf 'Stopping Sober instance...\n'
+        fi
+        sober_launcher_stop
+        pause_return
+        ;;
+      4|b|B)
+        return
+        ;;
+      *)
+        printf 'Please choose 1-4, or b to go back.\n'
+        pause_return
+        ;;
+    esac
+  done
+}
+
 # ── Interactive loops ─────────────────────────────────────────────────────────
 
 advanced_loop() {
@@ -1039,6 +1484,8 @@ print_module_toggles_screen() {
     "$MAGENTA" "$RESET" "$YELLOW" "$RESET" "$GREY" "$RESET"
   printf '%s║%s  ' "$MAGENTA" "$RESET"
   module_toggle_label "$TOGGLE_RECOVERY_RESTART" "Recovery Restart   (press 4 to toggle)"
+  printf '%s║%s  ' "$MAGENTA" "$RESET"
+  module_toggle_label "$TOGGLE_EVENT_VOTER" "Event Voter        (press 5 to toggle)"
   printf '%s╠══════════════════════════════════════════════════════════════╣%s\n' "$MAGENTA" "$RESET"
   printf '%s║%s  b) Back to main menu                                      %s║%s\n' "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
   printf '%s╚══════════════════════════════════════════════════════════════╝%s\n' "$MAGENTA" "$RESET"
@@ -1080,11 +1527,18 @@ module_toggles_loop() {
           TOGGLE_RECOVERY_RESTART=1
         fi
         ;;
+      5)
+        if test "$TOGGLE_EVENT_VOTER" = "1"; then
+          TOGGLE_EVENT_VOTER=0
+        else
+          TOGGLE_EVENT_VOTER=1
+        fi
+        ;;
       b|B)
         return
         ;;
       *)
-        printf 'Please choose 1-4 to toggle, or b to go back.\n'
+        printf 'Please choose 1-5 to toggle, or b to go back.\n'
         pause_return
         ;;
     esac
@@ -1120,9 +1574,14 @@ _acc_stop_full_macro() {
 }
 
 # Non-blocking key loop while the orchestrator runs in the background.
-# Reads p/P to request pause, c/C to continue. Updates the sticky controls line.
+# Reads d/D to toggle dashboard, p/P to request pause, c/C to continue.
+# Controls line is always printed via print_live_controls_line after every
+# view draw, so it remains visible in both art and dashboard modes.
 _acc_full_macro_key_loop() {
   local key ctrl_state last_ctrl_state
+  local _dash_view=0     # 0=art  1=dashboard
+  local _last_dash_sec=0 # epoch second of last dashboard draw
+  local _need_redraw=1   # draw art/dashboard on first tick and after toggle
   last_ctrl_state=""
 
   while kill -0 "$_acc_full_macro_orch_pid" 2>/dev/null && test "$ACC_STOP_REQUESTED" -eq 0; do
@@ -1146,25 +1605,45 @@ _acc_full_macro_key_loop() {
           orchestrator_control_request_continue
         fi
         ;;
+      d|D)
+        if test "$_dash_view" = "0"; then
+          _dash_view=1
+        else
+          _dash_view=0
+        fi
+        _need_redraw=1
+        ;;
     esac
 
     ctrl_state="$(orchestrator_control_get)"
+    local _state_changed=0
     if test "$ctrl_state" != "$last_ctrl_state"; then
       last_ctrl_state="$ctrl_state"
-      case "$ctrl_state" in
-        running)
-          printf '\r\033[2K%sControls: p = pause after current loop | Ctrl+C = stop%s' "$DIM" "$RESET"
-          ;;
-        pause_requested)
-          printf '\r\033[2K%sControls: pause requested — will pause after current loop | Ctrl+C = stop%s' "$YELLOW" "$RESET"
-          ;;
-        paused)
-          printf '\r\033[2K%sControls: c = continue | Ctrl+C = stop%s' "$CYAN" "$RESET"
-          ;;
-        continue_requested)
-          printf '\r\033[2K%sControls: resuming... | Ctrl+C = stop%s' "$DIM" "$RESET"
-          ;;
-      esac
+      _state_changed=1
+    fi
+
+    if test "$_dash_view" = "1"; then
+      # Dashboard view: refresh at most once per second, or on toggle/state change.
+      local _now_sec
+      _now_sec="$(date +%s)"
+      if test "$_need_redraw" = "1" || test "$_state_changed" = "1" \
+         || test "$(( _now_sec - _last_dash_sec ))" -ge 1; then
+        show_live_dashboard "$_full_macro_start_epoch" "$ctrl_state"
+        _last_dash_sec="$_now_sec"
+        _need_redraw=0
+        print_live_controls_line "dash" "$ctrl_state"
+      fi
+    else
+      # Art view: redraw art only on toggle (or first tick); controls on any change.
+      if test "$_need_redraw" = "1"; then
+        show_running_side_profile
+        _need_redraw=0
+        # Art was just redrawn — always reprint the controls line below it.
+        _state_changed=1
+      fi
+      if test "$_state_changed" = "1"; then
+        print_live_controls_line "art" "$ctrl_state"
+      fi
     fi
   done
   printf '\n'
@@ -1211,6 +1690,21 @@ confirm_full_macro_run() {
       printf '%s         The macro will refuse to start. Configure recovery or disable it.%s\n\n' "$RED" "$RESET"
     fi
   fi
+  if test "$TOGGLE_EVENT_VOTER" = "1"; then
+    local ev_times ev_priority ev_live
+    ev_times="$(event_voter_config_get EVENT_VOTER_TIMES)"
+    ev_priority="$(event_voter_config_get EVENT_VOTER_PRIORITY)"
+    ev_live="$(event_voter_config_get EVENT_VOTER_LIVE_ALLOWED)"
+    printf '  %s+ Event Voter%s  (experimental)\n' "$CYAN" "$RESET"
+    printf '    Schedule: %s (Amsterdam)\n' "${ev_times:-07:00,07:20,07:40,19:00,19:20,19:40}"
+    printf '    Priority: %s\n' "${ev_priority:-3x_xp,3x_mutation_chance}"
+    if test "${ev_live:-0}" = "1"; then
+      printf '    %sLIVE VOTING ARMED — will click real votes during event windows%s\n' "$BOLD$YELLOW" "$RESET"
+    else
+      printf '    Live voting: OFF (set EVENT_VOTER_LIVE_ALLOWED=1 to arm)\n'
+    fi
+    printf '    %sWARNING: Experimental — may click the wrong option occasionally.%s\n\n' "$RED" "$RESET"
+  fi
   printf 'How to stop:\n'
   printf '  Press %sCtrl+C%s while the macro is running.\n\n' "$BOLD$YELLOW" "$RESET"
   printf 'Make sure:\n'
@@ -1227,7 +1721,7 @@ confirm_full_macro_run() {
 }
 
 run_live_full_macro() {
-  local log_file="$1"
+  local output_target="$1"
 
   MACRO_INPUT_MODE=live \
     MACRO_LIVE_INPUT_ALLOWED=1 \
@@ -1236,11 +1730,13 @@ run_live_full_macro() {
     ORCHESTRATOR_MARKET_BUYER_ENABLED="$TOGGLE_MARKET_BUYER" \
     ORCHESTRATOR_FIGURINES_BUYER_ENABLED="$TOGGLE_FIGURINES_BUYER" \
     ORCHESTRATOR_RECOVERY_ENABLED="$TOGGLE_RECOVERY_RESTART" \
-    "$MACROCTL" live orchestrator >> "$log_file" 2>&1
+    ORCHESTRATOR_EVENT_VOTER_ENABLED="$TOGGLE_EVENT_VOTER" \
+    "$MACROCTL" live orchestrator >> "$output_target" 2>&1
 }
 
 run_full_macro_until_stopped() {
   local log_file
+  local output_target
   local start_ms
   local end_ms
   local status=0
@@ -1256,34 +1752,37 @@ run_full_macro_until_stopped() {
   orchestrator_control_init
 
   _acc_full_macro_orch_pid=""
+  _full_macro_start_epoch="$(date +%s)"
   ACC_STOP_REQUESTED=0
   old_int_trap="$(trap -p INT || true)"
   trap '_acc_stop_full_macro' INT
 
-  log_file="$(new_log_file full_macro)"
   start_ms="$(now_ms)"
   start_stamp="$(date +%Y-%m-%dT%H:%M:%S%z)"
-  printf 'start_timestamp=%s\n' "$start_stamp" >> "$log_file"
-  printf 'mode=full_macro\n' >> "$log_file"
-  printf 'pack_opener=%s\n' "$TOGGLE_PACK_OPENER" >> "$log_file"
-  printf 'market_buyer=%s\n' "$TOGGLE_MARKET_BUYER" >> "$log_file"
-  printf 'figurines_buyer=%s\n' "$TOGGLE_FIGURINES_BUYER" >> "$log_file"
+
+  if test "$ACC_DEBUG_LOGS" = "1"; then
+    log_file="$(new_log_file full_macro)"
+    output_target="$log_file"
+    printf 'start_timestamp=%s\n' "$start_stamp" >> "$log_file"
+    printf 'mode=full_macro\n' >> "$log_file"
+    printf 'pack_opener=%s\n' "$TOGGLE_PACK_OPENER" >> "$log_file"
+    printf 'market_buyer=%s\n' "$TOGGLE_MARKET_BUYER" >> "$log_file"
+    printf 'figurines_buyer=%s\n' "$TOGGLE_FIGURINES_BUYER" >> "$log_file"
+  else
+    log_file=""
+    output_target="/dev/null"
+  fi
 
   status_label="LIVE ARMED"
   live_countdown RUNNING
   status_label="RUNNING"
 
-  show_running_side_profile
-
-  if test "$interactive" -eq 1; then
-    printf '%sControls: p = pause after current loop | Ctrl+C = stop%s' "$DIM" "$RESET"
-  fi
-
   # Background the orchestrator so the UI can read terminal keys for pause/resume
-  run_live_full_macro "$log_file" &
+  run_live_full_macro "$output_target" &
   _acc_full_macro_orch_pid=$!
 
   if test "$interactive" -eq 1; then
+    # key loop handles initial art draw via _force_redraw=1
     _acc_full_macro_key_loop
   fi
 
@@ -1291,7 +1790,9 @@ run_full_macro_until_stopped() {
   _acc_full_macro_orch_pid=""
 
   if test "$ACC_STOP_REQUESTED" -ne 0; then
-    printf 'stopped_by_user=1\n' >> "$log_file"
+    if test -n "$log_file"; then
+      printf 'stopped_by_user=1\n' >> "$log_file"
+    fi
     status_label="STOPPED"
     status=130
   fi
@@ -1303,16 +1804,30 @@ run_full_macro_until_stopped() {
   fi
 
   end_ms="$(now_ms)"
-  printf 'elapsed_ms=%s\n' "$((end_ms - start_ms))" >> "$log_file"
+  if test -n "$log_file"; then
+    printf 'elapsed_ms=%s\n' "$((end_ms - start_ms))" >> "$log_file"
+  fi
 
   if test "$status" -eq 130; then
     status_label="STOPPED"
     printf '\n%sStopped by user.%s\n' "$YELLOW" "$RESET"
-    printf 'Log saved to:\n%s\n' "$log_file"
-    copy_log_if_possible "$log_file"
+    if test -n "$log_file"; then
+      printf 'Log saved to:\n%s\n' "$log_file"
+      copy_log_if_possible "$log_file"
+    fi
     return 0
   else
-    finish_run_message "$status" "$log_file"
+    if test -n "$log_file"; then
+      finish_run_message "$status" "$log_file"
+    else
+      if test "$status" -eq 0; then
+        status_label="COMPLETE"
+        printf '\n%sRun complete.%s\n' "$GREEN" "$RESET"
+      else
+        status_label="FAILED"
+        printf '\n%sRun stopped or failed.%s\n' "$RED" "$RESET"
+      fi
+    fi
     return "$status"
   fi
 }
@@ -1326,24 +1841,27 @@ interactive_loop() {
     read -r choice
     case "$choice" in
       1)
+        sober_instance_loop
+        ;;
+      2)
         clear_screen
         run_full_macro_until_stopped
         pause_return
         ;;
-      2)
+      3)
         module_toggles_loop
         ;;
-      3)
+      4)
         clear_screen
         print_status_screen
         pause_return
         ;;
-      4)
+      5)
         clear_screen
         print_modules_screen
         pause_return
         ;;
-      5)
+      6)
         advanced_loop
         ;;
       q|Q)
@@ -1351,7 +1869,7 @@ interactive_loop() {
         return 0
         ;;
       *)
-        printf 'Please choose 1-5, or q.\n'
+        printf 'Please choose 1-6, or q.\n'
         pause_return
         ;;
     esac

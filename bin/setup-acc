@@ -101,6 +101,8 @@ detect_os() {
 DEPS_REQUIRED=(bash git python3 xdotool flatpak gamescope grep sed)
 DEPS_OPTIONAL=(wl-copy xdg-open gawk awk)
 
+OPENCV_AVAILABLE=0
+
 check_dependencies() {
   DEPS_MISSING=()
   local dep
@@ -122,6 +124,19 @@ check_dependencies() {
     fi
   done
   printf '\n'
+  print_info "Event Voter (optional):"
+  if python3 -c "import cv2" 2>/dev/null; then
+    OPENCV_AVAILABLE=1
+    print_ok "python3-opencv — Installed (Event Voter can use visual detection)"
+  else
+    OPENCV_AVAILABLE=0
+    print_warn "python3-opencv — Not installed (Event Voter visual detection disabled)"
+    print_info "         Install: sudo apt install python3-opencv  (Pop!/Ubuntu)"
+    print_info "                  sudo dnf install python3-opencv  (Fedora)"
+    print_info "         Event Voter will remain disabled by default until installed."
+  fi
+
+  printf '\n'
   if test "${#DEPS_MISSING[@]}" -eq 0; then
     print_ok "All required programs are installed."
   else
@@ -142,28 +157,28 @@ install_dependencies() {
   if test "$DRY_RUN" = "1"; then
     print_info "[dry-run] Would offer to run:"
     print_info "  sudo apt update"
-    print_info "  sudo apt install -y bash coreutils git grep sed gawk python3 xdotool xdg-utils flatpak gamescope wl-clipboard"
+    print_info "  sudo apt install -y bash coreutils git grep sed gawk python3 python3-opencv xdotool xdg-utils flatpak gamescope wl-clipboard"
     return 0
   fi
 
   if test "$HAS_APT" = "0"; then
     print_warn "apt package manager not found."
     print_info "Please install the following programs using your package manager:"
-    print_info "  bash coreutils git grep sed gawk python3 xdotool xdg-utils flatpak gamescope wl-clipboard"
+    print_info "  bash coreutils git grep sed gawk python3 python3-opencv xdotool xdg-utils flatpak gamescope wl-clipboard"
     return 0
   fi
 
   print_info "The following command will be used to install missing programs:"
   print_info ""
   print_info "  sudo apt update"
-  print_info "  sudo apt install -y bash coreutils git grep sed gawk python3 xdotool xdg-utils flatpak gamescope wl-clipboard"
+  print_info "  sudo apt install -y bash coreutils git grep sed gawk python3 python3-opencv xdotool xdg-utils flatpak gamescope wl-clipboard"
   print_info ""
   print_info "You may be asked for your password."
   print_info ""
 
   if ask_yes_no "Install missing programs now?" "y"; then
     sudo apt update
-    sudo apt install -y bash coreutils git grep sed gawk python3 xdotool xdg-utils flatpak gamescope wl-clipboard
+    sudo apt install -y bash coreutils git grep sed gawk python3 python3-opencv xdotool xdg-utils flatpak gamescope wl-clipboard
     print_ok "Install complete."
   else
     print_warn "Skipped. Install missing programs before running the macro live."
@@ -396,18 +411,23 @@ _apply_blank_config() {
 # ── Private server URL ────────────────────────────────────────────────────────
 
 setup_private_server_url() {
-  print_header "Step 7 — Optional: Private server URL for recovery restarts"
+  print_header "Step 7 — Optional: Private server URL"
 
-  print_info "If you want ACC to automatically rejoin a private server after a"
-  print_info "crash or long session, you can save your private server URL now."
+  print_info "If you want ACC to automatically rejoin a private server (via Recovery"
+  print_info "Restart or Sober Instance Launcher), you can save your URL now."
   print_info ""
   print_info "You can skip this step and add it later by editing:"
   print_info "  runtime_config/recovery/defaults.conf"
+  print_info "  runtime_config/sober_launcher/defaults.conf"
+  print_info ""
+  print_info "NEVER commit runtime_config/ — it stays local and is gitignored."
   print_info ""
 
   if test "$DRY_RUN" = "1"; then
     print_info "[dry-run] Would ask whether to set a private server URL."
-    print_info "[dry-run] If yes, would write it to runtime_config/recovery/defaults.conf"
+    print_info "[dry-run] If yes, would write it to:"
+    print_info "[dry-run]   runtime_config/recovery/defaults.conf"
+    print_info "[dry-run]   runtime_config/sober_launcher/defaults.conf"
     print_info "[dry-run] The URL would never be printed again after storing."
     return 0
   fi
@@ -426,6 +446,7 @@ setup_private_server_url() {
     return 0
   fi
 
+  # Write to recovery config
   local rec_dir="$RC_DIR/recovery"
   local rec_defaults="$rec_dir/defaults.conf"
   mkdir -p "$rec_dir"
@@ -443,18 +464,69 @@ setup_private_server_url() {
     printf "RECOVERY_PRIVATE_SERVER_URL='%s'\n" "$url" >> "$rec_defaults"
   fi
 
-  print_ok "Private server URL saved to runtime_config/recovery/defaults.conf [configured]"
+  print_ok "Configured: runtime_config/recovery/defaults.conf"
+
+  # Write to sober_launcher config
+  local sl_dir="$RC_DIR/sober_launcher"
+  local sl_defaults="$sl_dir/defaults.conf"
+  mkdir -p "$sl_dir"
+
+  if test -f "$sl_defaults"; then
+    local tmp_file2
+    tmp_file2="$(mktemp)"
+    grep -v '^SOBER_PRIVATE_SERVER_URL=' "$sl_defaults" > "$tmp_file2" || true
+    printf "SOBER_PRIVATE_SERVER_URL='%s'\n" "$url" >> "$tmp_file2"
+    mv "$tmp_file2" "$sl_defaults"
+  else
+    if test -f "$project_root/config_templates/sober_launcher/defaults.conf"; then
+      cp "$project_root/config_templates/sober_launcher/defaults.conf" "$sl_defaults"
+    fi
+    printf "SOBER_PRIVATE_SERVER_URL='%s'\n" "$url" >> "$sl_defaults"
+  fi
+
+  print_ok "Configured: runtime_config/sober_launcher/defaults.conf"
   print_info ""
-  print_info "Recovery is still OFF by default (RECOVERY_ENABLED=0)."
-  print_info "To enable it, edit runtime_config/recovery/defaults.conf"
-  print_info "and set RECOVERY_ENABLED=1 after calibrating recovery button locations."
-  print_info "See docs/CALIBRATION.md for the recovery point list."
+  print_info "Recovery and Sober Launcher are still OFF by default."
+  print_info "Enable them only after calibrating their button locations."
+  print_info "See docs/CALIBRATION.md for the full point list."
+}
+
+# ── Event Voter training image info ──────────────────────────────────────────
+
+setup_event_voter_info() {
+  print_header "Event Voter — Training images"
+
+  print_info "Event Voter is an experimental visual module that auto-votes in"
+  print_info "Roblox in-game events. It is DISABLED by default."
+  print_info ""
+  print_info "To use Event Voter, you must provide your own training screenshots."
+  print_info "The public repo does not ship private game screenshots."
+  print_info ""
+  print_info "After setup, place your training images here:"
+  print_info "  runtime_config/event_voter/training/live_event_seed.png"
+  print_info "  runtime_config/event_voter/training/live_event_seed_mutation.png"
+  print_info ""
+  print_info "These are local screenshots of the event panel in your game session."
+  print_info "See docs/EVENT_VOTER_EXPERIMENT.md for how to capture them."
+  print_info ""
+
+  local training_dir="$RC_DIR/event_voter/training"
+  if test "$DRY_RUN" = "1"; then
+    print_info "[dry-run] Would create: runtime_config/event_voter/training/"
+    return 0
+  fi
+
+  mkdir -p "$training_dir"
+  print_ok "runtime_config/event_voter/training/ — Created (add your screenshots here)"
+  print_info ""
+  print_info "Event Voter defaults: EVENT_VOTER_ENABLED=0 EVENT_VOTER_LIVE_ALLOWED=0"
+  print_info "Enable only after adding training images and testing with dry-run."
 }
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
 run_validation() {
-  print_header "Step 8 — Non-live validation checks"
+  print_header "Step 9 — Non-live validation checks"
 
   print_info "Running syntax and config checks only. No live input will be sent."
   print_info ""
@@ -520,6 +592,21 @@ run_validation() {
     failed=1
   fi
 
+  printf '\n  Running: macroctl validate-config sober-launcher\n'
+  if MACRO_PROJECT_ROOT="$project_root" "$project_root/bin/macroctl" validate-config sober-launcher 2>&1 | sed 's/^/    /'; then
+    print_ok "validate-config sober-launcher"
+  else
+    print_warn "validate-config sober-launcher found issues"
+    failed=1
+  fi
+
+  printf '\n  Running: macroctl validate-config event-voter\n'
+  if MACRO_PROJECT_ROOT="$project_root" "$project_root/bin/macroctl" validate-config event-voter 2>&1 | sed 's/^/    /'; then
+    print_ok "validate-config event-voter"
+  else
+    print_warn "validate-config event-voter found issues (expected if opencv not installed)"
+  fi
+
   printf '\n  Running: macroctl dry-run orchestrator --cycles 3\n'
   if MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
       "$project_root/bin/macroctl" dry-run orchestrator --cycles 3 2>&1 | sed 's/^/    /'; then
@@ -535,6 +622,30 @@ run_validation() {
     print_ok "dry-run recovery"
   else
     print_warn "dry-run recovery returned issues (expected if recovery is not yet configured)"
+  fi
+
+  printf '\n  Running: macroctl dry-run sober-launcher-status\n'
+  if MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+      "$project_root/bin/macroctl" dry-run sober-launcher-status 2>&1 | sed 's/^/    /'; then
+    print_ok "dry-run sober-launcher-status"
+  else
+    print_warn "dry-run sober-launcher-status returned issues"
+  fi
+
+  printf '\n  Running: macroctl dry-run sober-launcher-open-private\n'
+  if MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+      "$project_root/bin/macroctl" dry-run sober-launcher-open-private 2>&1 | sed 's/^/    /'; then
+    print_ok "dry-run sober-launcher-open-private"
+  else
+    print_warn "dry-run sober-launcher-open-private returned issues (expected if no URL configured)"
+  fi
+
+  printf '\n  Running: macroctl dry-run event-voter-schedule\n'
+  if MACRO_INPUT_MODE=dry-run MACRO_PROJECT_ROOT="$project_root" \
+      "$project_root/bin/macroctl" dry-run event-voter-schedule 2>&1 | sed 's/^/    /'; then
+    print_ok "dry-run event-voter-schedule"
+  else
+    print_warn "dry-run event-voter-schedule returned issues (expected if event voter is disabled)"
   fi
 
   printf '\n'
@@ -751,8 +862,9 @@ main() {
 
     setup_runtime_config
     setup_private_server_url
+    setup_event_voter_info
 
-    print_header "Step 8 — Validation"
+    print_header "Step 9 — Validation"
     print_info "[dry-run] Would run:"
     print_info "  bash -n bin/acc bin/pack-opener-ui bin/macroctl bin/setup-acc"
     print_info "  bash -n src/modules/*.sh src/lib/*.sh"
@@ -760,8 +872,13 @@ main() {
     print_info "  ./bin/macroctl validate-config pack-opener"
     print_info "  ./bin/macroctl validate-config orchestrator"
     print_info "  ./bin/macroctl validate-config recovery"
+    print_info "  ./bin/macroctl validate-config sober-launcher"
+    print_info "  ./bin/macroctl validate-config event-voter"
     print_info "  ./bin/macroctl dry-run orchestrator --cycles 3"
     print_info "  ./bin/macroctl dry-run recovery"
+    print_info "  ./bin/macroctl dry-run sober-launcher-status"
+    print_info "  ./bin/macroctl dry-run sober-launcher-open-private"
+    print_info "  ./bin/macroctl dry-run event-voter-schedule"
     printf '\n'
     print_ok "[dry-run] Dry-run complete. No changes were made."
     printf '\n'
@@ -840,7 +957,10 @@ main() {
   # Step 7 — Private server URL
   setup_private_server_url
 
-  # Step 8 — Validation
+  # Step 8 — Event Voter training info
+  setup_event_voter_info
+
+  # Step 9 — Validation
   run_validation
 
   # Done

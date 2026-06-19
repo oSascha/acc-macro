@@ -133,6 +133,26 @@ config_recovery_template_dir() {
   printf '%s/config_templates/recovery\n' "$(config_project_root)"
 }
 
+config_event_voter_dir() {
+  printf '%s/event_voter\n' "$(config_runtime_dir)"
+}
+
+config_event_voter_template_dir() {
+  printf '%s/config_templates/event_voter\n' "$(config_project_root)"
+}
+
+config_sober_launcher_dir() {
+  printf '%s/sober_launcher\n' "$(config_runtime_dir)"
+}
+
+config_sober_launcher_template_dir() {
+  printf '%s/config_templates/sober_launcher\n' "$(config_project_root)"
+}
+
+config_sober_launcher_defaults_file() {
+  printf '%s/defaults.conf\n' "$(config_sober_launcher_dir)"
+}
+
 config_print_pack_opener_paths() {
   local root
   local runtime_dir

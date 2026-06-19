@@ -22,6 +22,8 @@ fi
 . "$_orchestrator_project_root/src/lib/input.sh"
 # shellcheck source=../lib/orchestrator_control.sh
 . "$_orchestrator_project_root/src/lib/orchestrator_control.sh"
+# shellcheck source=../lib/run_metrics.sh
+. "$_orchestrator_project_root/src/lib/run_metrics.sh"
 # shellcheck source=market_buyer.sh
 . "$_orchestrator_project_root/src/modules/market_buyer.sh"
 # shellcheck source=figurines_buyer.sh
@@ -32,6 +34,8 @@ fi
 . "$_orchestrator_project_root/src/modules/live_cycle_runner.sh"
 # shellcheck source=recovery_restart.sh
 . "$_orchestrator_project_root/src/modules/recovery_restart.sh"
+# shellcheck source=event_voter.sh
+. "$_orchestrator_project_root/src/modules/event_voter.sh"
 
 # macroctl path — used only for orchestrator_dry_run (not live pack cycles)
 _ORCHESTRATOR_MACROCTL="${MACROCTL_PATH:-$_orchestrator_project_root/bin/macroctl}"
@@ -42,15 +46,19 @@ ORCHESTRATOR_PACK_ENABLED="${ORCHESTRATOR_PACK_ENABLED:-}"
 ORCHESTRATOR_MARKET_BUYER_ENABLED="${ORCHESTRATOR_MARKET_BUYER_ENABLED:-}"
 ORCHESTRATOR_FIGURINES_BUYER_ENABLED="${ORCHESTRATOR_FIGURINES_BUYER_ENABLED:-}"
 ORCHESTRATOR_RECOVERY_ENABLED="${ORCHESTRATOR_RECOVERY_ENABLED:-}"
+ORCHESTRATOR_EVENT_VOTER_ENABLED="${ORCHESTRATOR_EVENT_VOTER_ENABLED:-}"
 
 # Resolved at runtime after loading config
 _orch_pack_enabled=1
 _orch_market_enabled=1
 _orch_figurines_enabled=1
 _orch_recovery_enabled=0
+_orch_event_voter_enabled=0
 
 orchestrator_trace() {
-  printf 'TRACE orchestrator %s\n' "$*"
+  if acc_trace_enabled; then
+    printf 'TRACE orchestrator %s\n' "$*"
+  fi
 }
 
 orchestrator_load_config() {
@@ -79,6 +87,9 @@ orchestrator_load_config() {
   # Load recovery config to resolve _rec_enabled; env var takes priority for session toggle
   recovery_load_config || true
   _orch_recovery_enabled="${ORCHESTRATOR_RECOVERY_ENABLED:-${_rec_enabled:-0}}"
+
+  event_voter_load_config 2>/dev/null || true
+  _orch_event_voter_enabled="${ORCHESTRATOR_EVENT_VOTER_ENABLED:-${EVENT_VOTER_ENABLED:-0}}"
 }
 
 # Returns current 10-minute slot as YYYYMMDD-HH-MM if minute % 10 == 0, else empty.
@@ -118,6 +129,7 @@ orchestrator_run_buyers() {
       MACRO_INPUT_MODE=dry-run market_buyer_dry_run || return 2
     else
       market_buyer_run || return 2
+      run_metrics_market_complete 2>/dev/null || true
     fi
   else
     orchestrator_trace "market buyer disabled — skip"
@@ -129,6 +141,7 @@ orchestrator_run_buyers() {
       MACRO_INPUT_MODE=dry-run figurines_buyer_dry_run || return 2
     else
       figurines_buyer_run || return 2
+      run_metrics_figurines_complete 2>/dev/null || true
     fi
   else
     orchestrator_trace "figurines buyer disabled — skip"
@@ -159,9 +172,25 @@ orchestrator_check_pause() {
   done
 }
 
+orchestrator_check_event_voter() {
+  if test "$_orch_event_voter_enabled" != "1"; then
+    return 0
+  fi
+  if ! event_voter_should_hold_now; then
+    return 0
+  fi
+  orchestrator_trace "event voter: event approaching — holding at safe boundary"
+  while ! event_voter_due_now; do
+    sleep 1
+  done
+  orchestrator_trace "event voter: running live window"
+  event_voter_run_live_window || orchestrator_trace "event voter: window exited non-zero — continuing"
+}
+
 orchestrator_run() {
   orchestrator_load_config || return 2
   orchestrator_require_live_gate || return 2
+  run_metrics_init 2>/dev/null || true
 
   if test "$_orch_pack_enabled" != "1" \
      && test "$_orch_market_enabled" != "1" \
@@ -190,6 +219,12 @@ orchestrator_run() {
       return 2
     fi
   fi
+  if test "$_orch_event_voter_enabled" = "1"; then
+    if ! event_voter_preflight 2>/dev/null; then
+      orchestrator_trace "event voter preflight failed — voter disabled for this run"
+      _orch_event_voter_enabled=0
+    fi
+  fi
 
   # Set up pack opener for in-process running (no subprocess per cycle).
   # load_context + preflight + prepare_context are called once here, not per cycle.
@@ -215,12 +250,15 @@ orchestrator_run() {
   while true; do
     # Safe boundary: before starting new pack cycle
     orchestrator_check_pause
+    orchestrator_check_event_voter
 
     if test "$_orch_pack_enabled" = "1"; then
       cycle=$((cycle + 1))
       live_cycle_runner_run_cycle "$cycle" 1 0 || return 2
+      run_metrics_cycle_complete 2>/dev/null || true
       # Safe boundary: after pack cycle completes
       orchestrator_check_pause
+      orchestrator_check_event_voter
     else
       orchestrator_trace "pack opener disabled — idle 2s"
       sleep 2
@@ -249,7 +287,11 @@ orchestrator_run() {
         # Safe boundary: before recovery
         orchestrator_check_pause
         orchestrator_trace "recovery due — running maintenance restart"
-        recovery_run_live || orchestrator_trace "recovery exited non-zero — continuing pack loop"
+        if recovery_run_live; then
+          run_metrics_recovery_complete 2>/dev/null || true
+        else
+          orchestrator_trace "recovery exited non-zero — continuing pack loop"
+        fi
         # Safe boundary: after recovery
         orchestrator_check_pause
       fi
@@ -278,6 +320,7 @@ orchestrator_dry_run() {
   printf '  market_buyer:      %s\n' "$(test "$_orch_market_enabled"    = "1" && printf 'enabled' || printf 'disabled')"
   printf '  figurines_buyer:   %s\n' "$(test "$_orch_figurines_enabled" = "1" && printf 'enabled' || printf 'disabled')"
   printf '  recovery_restart:  %s\n' "$(test "$_orch_recovery_enabled"  = "1" && printf "enabled (every ${_rec_interval_minutes}min)" || printf 'disabled')"
+  printf '  event_voter:       %s\n' "$(test "$_orch_event_voter_enabled" = "1" && printf 'enabled' || printf 'disabled')"
   printf '  buyer_schedule:    every 10 minutes (:00/:10/:20/:30/:40/:50)\n'
   printf '  buyer_order:       Market Buyer → Figurines Buyer\n'
   printf '  recovery_order:    after buyers (never interrupts buyers or pack cycles)\n'

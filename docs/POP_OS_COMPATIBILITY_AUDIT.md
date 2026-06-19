@@ -16,7 +16,7 @@ Last audited: 2026-06-18
 | `xdotool` | Setup req | Must be installed; targets nested X display |
 | `gamescope` | Setup req | Must be installed and launched |
 | Sober (Flatpak) | Setup req | Same Flatpak install as on Fedora |
-| Hardcoded home paths | OK | Not present in source |
+| Hardcoded `/home/chino` | OK | Not present in source |
 | Hardcoded `DISPLAY=:1` | OK | Read dynamically from `env-attached.txt` |
 | `dnf` / Fedora packages | OK | No `dnf` calls in runtime source |
 | `ydotool` / `ydotoold` | OK | Not used |
@@ -34,7 +34,7 @@ ACC does not depend on the compositor.
 ### OK — No hardcoded home paths
 
 `src/lib/env.sh` uses `${HOME}` to construct the Gamescope manager directory path.
-No hardcoded home directory paths appear in committed source files.
+No `/home/chino` or `/home/sascha` strings appear in committed source files.
 
 The Gamescope manager directory:
 ```
