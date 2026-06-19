@@ -113,7 +113,7 @@ live_cycle_runner_get_timing() {
 
   case "$key" in
     PLACE_LIVE_CLICK_BURST_DELAY)
-      printf '1ms\n'
+      printf '8ms\n'
       return 0
       ;;
     PLACE_LIVE_CLICK_BURST_SAFETY_MARGIN)

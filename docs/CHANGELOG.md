@@ -1,5 +1,12 @@
 # ACC Changelog
 
+## 2026-06-19 — Set default placement click burst delay to 8ms
+
+- **`PLACE_LIVE_CLICK_BURST_DELAY=8ms`**: Inter-click delay within each placement click burst
+  is now 8ms in all defaults (template, 800x600 preset, and source fallbacks). Prior values
+  (0ms in template, 3ms in preset, 1ms in source fallbacks) were found to be unstable in
+  live testing. 8ms is the live-validated stable value.
+
 ## 2026-06-19 — Event Voter live diagnostics and fail-soft patch
 
 - **Fail-soft guarantee**: Event Voter failures (screenshot capture error, detector crash,
